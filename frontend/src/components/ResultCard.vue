@@ -7,8 +7,9 @@ import { computed, ref } from 'vue'
 import { CopyDocument, Download, Microphone, RefreshRight } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import AudioPlayer from '@/components/AudioPlayer.vue'
-import { audioUrl } from '@/api'
+import { audioUrl, fetchAudioBlob } from '@/api'
 import type { GenerateResponse } from '@/api/types'
+import { buildAudioFilename, canPickSaveLocation, saveBlobAs } from '@/utils/download'
 import { copyText, formatBytes, formatDateTime, formatSeconds } from '@/utils/format'
 
 const props = defineProps<{
@@ -40,11 +41,53 @@ const downloadUrl = computed<string>(() => {
 })
 
 /** Suggested file name for the download. */
-const downloadName = computed<string>(() => {
-  const id = props.result.record_id ?? 'result'
-  const format = props.result.audio_format || 'mp3'
-  return `text2voice-${id}.${format}`
-})
+const downloadName = computed<string>(() =>
+  buildAudioFilename(props.result.record_id ?? 'result', props.result.audio_format || 'mp3'),
+)
+
+/** Whether the browser can prompt for a save location. */
+const supportsSaveAs = computed<boolean>(() => canPickSaveLocation())
+
+const saving = ref(false)
+
+/**
+ * Save the audio, preferring a user-chosen destination.
+ *
+ * Chromium lets us open a real "另存为" dialog via the File System Access API;
+ * elsewhere we fall back to the browser's download folder.
+ */
+async function handleSaveAs(): Promise<void> {
+  if (!props.result.audio_url && props.result.record_id === null) {
+    ElMessage.warning('没有可导出的音频')
+    return
+  }
+  saving.value = true
+  try {
+    let blob: Blob
+    if (props.result.audio_base64) {
+      const binary = atob(props.result.audio_base64)
+      const bytes = new Uint8Array(binary.length)
+      for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index)
+      blob = new Blob([bytes], { type: 'audio/mpeg' })
+    } else if (props.result.record_id !== null) {
+      blob = await fetchAudioBlob(props.result.record_id)
+    } else {
+      const response = await fetch(props.result.audio_url)
+      blob = await response.blob()
+    }
+
+    const mime = blob.type || 'audio/mpeg'
+    const outcome = await saveBlobAs(blob, downloadName.value, mime)
+    if (outcome.cancelled) return
+    ElMessage.success(
+      outcome.mode === 'picker' ? '已保存到你选择的文件夹' : '已保存到浏览器下载目录',
+    )
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? `保存失败：${error.message}` : '保存失败')
+  } finally {
+    saving.value = false
+  }
+}
 
 /** Playable audio URL. */
 const audioSrc = computed<string>(() => {
@@ -68,10 +111,6 @@ async function handleCopy(): Promise<void> {
   copying.value = false
   if (ok) ElMessage.success('回复文本已复制')
   else ElMessage.warning('复制失败，请手动选择文本')
-}
-
-function notifyDownload(): void {
-  ElMessage.success('已开始下载音频文件')
 }
 
 /** Plain-text export of the whole result, used by the "复制全部" action. */
@@ -201,17 +240,26 @@ async function handleCopyAll(): Promise<void> {
     </section>
 
     <div class="result-card__actions">
-      <el-button
-        tag="a"
-        type="primary"
-        :icon="Download"
-        :href="downloadUrl || undefined"
-        :download="downloadName"
-        :disabled="!hasAudio"
-        @click="notifyDownload"
+      <el-tooltip
+        :content="
+          supportsSaveAs
+            ? '选择保存位置后导出音频'
+            : '浏览器不支持选择位置，将保存到默认下载目录'
+        "
+        placement="top"
       >
-        下载音频
-      </el-button>
+        <span>
+          <el-button
+            type="primary"
+            :icon="Download"
+            :loading="saving"
+            :disabled="!hasAudio"
+            @click="handleSaveAs"
+          >
+            {{ supportsSaveAs ? '另存为…' : '下载音频' }}
+          </el-button>
+        </span>
+      </el-tooltip>
       <el-button :icon="RefreshRight" :disabled="!hasAudio" @click="emit('regenerate-tts')">
         仅重新合成语音
       </el-button>

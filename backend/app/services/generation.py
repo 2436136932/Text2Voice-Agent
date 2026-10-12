@@ -50,7 +50,10 @@ from app.schemas.generation import (
     UsageSchema,
 )
 from app.services.audio import audio_store, estimate_duration_ms
+from app.services.media import media_store
 from app.services.metrics import metrics
+from app.services.providers import annotate_tts_error
+from app.services.voices import media_missing_error, reference_unsupported_error
 
 logger = get_logger(__name__)
 
@@ -252,6 +255,37 @@ class GenerationService:
 
         on_progress("tts", 60, f"正在调用 {adapter.name} 合成语音…")
 
+        extra = dict(request.tts.extra)
+        if request.options.reference_media_id:
+            # Resolve the clip first: if the upload is gone, that is the
+            # actionable problem ("上传已过期"), and reporting a capability
+            # mismatch instead would send the user down the wrong path.
+            try:
+                record = media_store.load(request.options.reference_media_id)
+                reference_bytes = media_store.read_bytes(record)
+            except AppError as exc:
+                if exc.code is ErrorCode.MEDIA_NOT_FOUND:
+                    raise media_missing_error(request.options.reference_media_id) from exc
+                raise
+
+            # Then validate the capability, *before* spending a TTS call: a
+            # provider that can neither clone nor consume a reference clip
+            # would silently ignore the clip and produce the wrong voice, which
+            # is worse than an error.
+            if not (adapter.supports_reference_audio or adapter.supports_voice_clone):
+                raise reference_unsupported_error(adapter.id, request.tts.model or "")
+
+            extra["reference_audio_media_id"] = record.media_id
+            extra["reference_audio_bytes"] = reference_bytes
+            extra["reference_audio_filename"] = record.filename
+            extra["reference_audio_duration_ms"] = record.duration_ms
+            logger.info(
+                "tts reference audio resolved provider=%s media_id=%s bytes=%s",
+                adapter.id,
+                request.options.reference_media_id,
+                len(reference_bytes),
+            )
+
         tts_request = TTSRequest(
             text=reply_text,
             api_key=api_key,
@@ -261,7 +295,7 @@ class GenerationService:
             speed=adapter.clamp_speed(request.tts.speed),
             audio_format=audio_format,
             language=request.tts.language,
-            extra=request.tts.extra,
+            extra=extra,
         )
 
         if tts_budget.is_open(adapter.id):
@@ -282,6 +316,9 @@ class GenerationService:
         except AppError as exc:
             metrics.record_provider_call("tts", adapter.id, ok=False)
             tts_budget.record_failure(adapter.id)
+            # Enrich model-mismatch failures ("model not found") with advice on
+            # which model to pick, so the user is not left with a raw 404.
+            exc = annotate_tts_error(exc, adapter.id)
             logger.error(
                 "tts stage failed provider=%s code=%s message=%s",
                 adapter.id, exc.code.value, exc.message,

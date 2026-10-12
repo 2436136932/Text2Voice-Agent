@@ -27,6 +27,7 @@ os.environ.update(
         "T2V_DEBUG": "false",
         "T2V_DATABASE_URL": f"sqlite+aiosqlite:///{(_TMP_DIR / 'test.db').as_posix()}",
         "T2V_AUDIO_DIR": str(_TMP_DIR / "audio"),
+        "T2V_MEDIA_DIR": str(_TMP_DIR / "media"),
         "T2V_LOG_LEVEL": "WARNING",
         "T2V_RATE_LIMIT_ENABLED": "false",
         "T2V_UPSTREAM_MAX_RETRIES": "1",
@@ -43,6 +44,7 @@ from app.api.app import create_app  # noqa: E402
 from app.core.config import get_settings  # noqa: E402
 from app.db.base import dispose_db, get_engine, get_sessionmaker, init_db  # noqa: E402
 from app.services.audio import AudioStore, audio_store  # noqa: E402
+from app.services.media import MediaStore, media_store  # noqa: E402
 from app.services.tasks import task_manager  # noqa: E402
 
 
@@ -72,6 +74,7 @@ async def app(settings):
     per_test_dir = Path(tempfile.mkdtemp(prefix="t2v-db-"))
     settings.database_url = f"sqlite+aiosqlite:///{(per_test_dir / 'test.db').as_posix()}"
     settings.audio_dir = str(per_test_dir / "audio")
+    settings.media_dir = str(per_test_dir / "media")
 
     application = create_app()
     await init_db()
@@ -107,6 +110,11 @@ def tmp_audio_store(tmp_path) -> AudioStore:
     return AudioStore(root=tmp_path / "audio")
 
 
+@pytest.fixture(scope="function")
+def tmp_media_store(tmp_path) -> MediaStore:
+    return MediaStore(root=tmp_path / "media")
+
+
 @pytest.fixture(autouse=True, scope="function")
 def _reset_audio_dir(settings):
     """Keep the audio directory clean between tests."""
@@ -116,6 +124,27 @@ def _reset_audio_dir(settings):
             if item.is_file():
                 item.unlink()
     yield
+
+
+@pytest.fixture(autouse=True, scope="function")
+def _reset_media_dir(settings):
+    """Keep uploaded-media scratch space clean between tests."""
+    target = settings.media_path
+    if target.exists():
+        for item in target.glob("*"):
+            if item.is_file():
+                item.unlink()
+    yield
+
+
+@pytest.fixture(autouse=True, scope="function")
+def _reset_ffmpeg_probe():
+    """Never let one test's ffmpeg probe result leak into the next."""
+    from app.services.tools import reset_probe_cache
+
+    reset_probe_cache()
+    yield
+    reset_probe_cache()
 
 
 def pytest_configure(config):  # pragma: no cover - reporting helper

@@ -24,25 +24,36 @@ from app.core.logging import configure_logging, get_logger
 from app.db.base import dispose_db, get_sessionmaker, init_db
 from app.schemas.generation import ErrorResponse, HealthResponse
 from app.services.history import history_service
+from app.services.media import media_store
 from app.services.tasks import task_manager
 
 logger = get_logger(__name__)
 
 
 async def _retention_loop() -> None:
-    """Daily housekeeping: purge records past the retention window."""
-    if settings.audio_retention_days <= 0:
+    """Daily housekeeping: purge records past the retention window.
+
+    Covers both generated audio (history) and the scratch uploads under
+    ``data/media`` - the latter are reference clips that have already served
+    their purpose once a voice is cloned.
+    """
+    if settings.audio_retention_days <= 0 and settings.media_retention_days <= 0:
         return
     while True:
         try:
             await asyncio.sleep(24 * 3600)
-            async with get_sessionmaker()() as session:
-                removed = await history_service.purge_older_than(
-                    session, days=settings.audio_retention_days
-                )
-                await session.commit()
-            if removed:
-                logger.info("retention job removed records=%s", removed)
+            if settings.audio_retention_days > 0:
+                async with get_sessionmaker()() as session:
+                    removed = await history_service.purge_older_than(
+                        session, days=settings.audio_retention_days
+                    )
+                    await session.commit()
+                if removed:
+                    logger.info("retention job removed records=%s", removed)
+            if settings.media_retention_days > 0:
+                purged = media_store.purge_older_than(days=settings.media_retention_days)
+                if purged:
+                    logger.info("retention job purged media=%s", purged)
         except asyncio.CancelledError:  # pragma: no cover
             return
         except Exception:  # noqa: BLE001
@@ -102,8 +113,22 @@ DESCRIPTION = """
 | 同步 | `POST /generate` | 脚本、一次性调用，直接拿结果 |
 | 异步 | `POST /tasks` + `GET /tasks/{id}` | Web 界面，需要进度反馈 |
 
+### 声音克隆
+上传参考音频 → 解析/裁剪 → 交给服务商克隆 → 新音色自动出现在音色列表。
+
+1. `GET /capabilities` —— 先探测本机能力（是否装了 ffmpeg、哪些服务商支持克隆）；
+2. `POST /media/inspect` —— 上传参考音频/视频，拿到 `media_id` 与时长；
+3. `POST /media/trim` —— 可选，裁出 10–30 秒的高质量片段（WAV 原生裁剪，其他格式需 ffmpeg）；
+4. `POST /voices/clone` —— 真正发起克隆，返回 `voice_id`；
+5. `GET /providers` —— 新音色已并入对应服务商的 `voices` 列表（`cloned=true`），可直接用于生成。
+
+> **没有 ffmpeg 也能用**：仅 WAV 的裁剪与音轨提取受限，克隆主流程不受影响。
+> 安装命令：`winget install Gyan.FFmpeg`。
+
 ### 错误约定
 所有非 2xx 响应统一为：`{"code", "message", "detail", "request_id"}`。
+面向用户的错误会在 `detail.suggestion` 中给出**中文操作建议**（例如该换成哪个模型、
+该装什么软件），前端可直接展示该字段。
 完整错误码字典见 `GET /meta/error-codes`。
 """
 
@@ -113,8 +138,10 @@ TAGS_METADATA = [
     {"name": "异步任务 Tasks", "description": "提交、轮询进度、获取结果、取消"},
     {"name": "历史记录 History", "description": "分页查询、详情、删除、统计与导出"},
     {"name": "音频 Audio", "description": "音频流播放与下载（支持 Range）"},
+    {"name": "媒体 Media", "description": "参考音频/视频上传、解析、裁剪与预览（WAV 原生支持，其他格式需 ffmpeg）"},
+    {"name": "声音克隆 Voices", "description": "用参考音频克隆音色、列出与删除「我的音色」（密钥不落库）"},
     {"name": "系统设置 Settings", "description": "用户偏好设置（不含任何密钥）"},
-    {"name": "系统 System", "description": "健康检查"},
+    {"name": "系统 System", "description": "健康检查与环境能力探测（ffmpeg / 声音克隆能力）"},
     {"name": "元信息 Meta", "description": "错误码字典、运行指标、非敏感配置"},
 ]
 

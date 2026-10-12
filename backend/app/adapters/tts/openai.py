@@ -51,6 +51,17 @@ class OpenAITTSAdapter(TTSAdapter):
         {"id": "tts-1", "name": "tts-1 (低延迟)"},
         {"id": "tts-1-hd", "name": "tts-1-hd (高音质)"},
     )
+    # -- voice cloning ------------------------------------------------------
+    # OpenAI has no public voice-cloning API; cloning is only reachable through
+    # the fine-tuning flow. The reference clip is therefore attached to each
+    # synthesis call instead (currently forwarded only for the ``custom``
+    # adapter, which talks to gateways that do accept it).
+    supports_voice_clone = False
+    supports_reference_audio = False
+    clone_hint = (
+        "OpenAI 官方暂不提供声音克隆接口，只能使用内置音色（alloy、nova 等）。"
+        "需要克隆请改用 ElevenLabs 或 MiniMax。"
+    )
 
     def info(self) -> AdapterInfo:
         return AdapterInfo(
@@ -89,6 +100,24 @@ class OpenAITTSAdapter(TTSAdapter):
         instructions = request.extra.get("instructions")
         if instructions and model.startswith("gpt-4o"):
             payload["instructions"] = str(instructions)[:1000]
+
+        # Optional reference clip (only for adapters that declare
+        # ``supports_reference_audio``, i.e. ``custom``). Base64 keeps the
+        # request a single JSON document, which is what the OpenAI-compatible
+        # gateways that support this expect (``reference_audio`` /
+        # ``prompt_audio``). Official OpenAI rejects unknown fields, so this is
+        # gated on the capability flag rather than sent unconditionally.
+        if self.supports_reference_audio:
+            reference = request.extra.get("reference_audio_bytes")
+            if isinstance(reference, (bytes, bytearray)) and reference:
+                import base64
+
+                payload["reference_audio"] = base64.b64encode(bytes(reference)).decode("ascii")
+                payload["prompt_audio"] = payload["reference_audio"]
+                logger.info(
+                    "tts reference audio attached provider=%s bytes=%s",
+                    self.id, len(reference),
+                )
 
         url = f"{self.resolve_base_url(request.base_url)}/audio/speech"
         headers = {

@@ -5,13 +5,14 @@ from __future__ import annotations
 from fastapi import APIRouter, status
 from pydantic import BaseModel, Field, SecretStr
 
-from app.api.deps import RateLimitDefault, RateLimitGenerate
+from app.api.deps import RateLimitDefault, RateLimitGenerate, SessionDep
 from app.schemas.generation import (
     ProviderListResponse,
     ValidateProviderRequest,
     ValidateProviderResponse,
 )
 from app.services.providers import provider_service
+from app.services.voices import voice_service
 
 router = APIRouter(prefix="/providers", tags=["服务商 Providers"])
 
@@ -62,12 +63,42 @@ def _looks_like_tts(model_id: str) -> bool:
     description=(
         "返回前端渲染配置表单所需的全部元数据：模型列表、音色列表、"
         "语速范围、支持的音频格式、是否需要 base_url 等。"
-        "API 密钥不在其中——它由用户每次请求时携带。"
+        "API 密钥不在其中——它由用户每次请求时携带。\n\n"
+        "**声音克隆能力**：TTS 条目额外包含 `supports_voice_clone`、"
+        "`supports_reference_audio`、`clone_models`、`clone_hint` 四个字段，"
+        "前端据此决定是否展示「克隆音色」入口以及推荐哪个模型。\n\n"
+        "**我的音色**：本机克隆成功的音色会合并到对应服务商的 `voices` 列表中，"
+        "并标记 `cloned=true`。因此音色列表是动态的，克隆成功后刷新本接口即可选到新音色。"
     ),
+    responses={429: {"description": "触发限流"}},
 )
-async def list_providers(_: RateLimitDefault) -> ProviderListResponse:
+async def list_providers(
+    _: RateLimitDefault,
+    session: SessionDep,
+) -> ProviderListResponse:
     catalog = provider_service.catalog()
+    # ``registry.describe_all()`` stays a pure static catalog; the user's own
+    # cloned voices are merged in here so the UI can offer them immediately
+    # after a successful clone (no backend restart needed).
+    cloned = await voice_service.by_provider(session)
+    for entry in catalog.get("tts", []):
+        extra_voices = cloned.get(entry["id"])
+        if not extra_voices:
+            continue
+        entry["voices"] = [*entry.get("voices", []), *[_as_voice(item) for item in extra_voices]]
     return ProviderListResponse(**catalog)
+
+
+def _as_voice(item: dict) -> dict:
+    """Render a ``ClonedVoice`` row as a ``VoiceInfo``-shaped dict."""
+    return {
+        "id": item["voice_id"],
+        "name": f"{item['name']}（我的音色）",
+        "gender": "neutral",
+        "language": "multi",
+        "description": f"克隆音色 · 模型 {item.get('model') or '默认'}",
+        "cloned": True,
+    }
 
 
 @router.post(

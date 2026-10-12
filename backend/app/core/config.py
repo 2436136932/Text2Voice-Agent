@@ -52,8 +52,14 @@ class Settings(BaseSettings):
     # Relative paths are resolved against the ``backend/`` directory.
     database_url: str = "sqlite+aiosqlite:///./data/text2voice.db"
     audio_dir: str = "./data/audio"
-    # Generated audio is kept on disk only for this long (0 disables cleanup).
+    #: Uploaded reference clips (audio/video) for voice cloning.
+    media_dir: str = "./data/media"
+    #: Generated audio is kept on disk only for this long (0 disables cleanup).
     audio_retention_days: int = 30
+    #: Uploaded reference clips are scratch data — shorter retention by default.
+    media_retention_days: int = 7
+    #: Largest accepted upload (MB) for reference clips.
+    max_upload_mb: int = 50
 
     # -- Security -----------------------------------------------------------
     # ``/docs`` and ``/openapi.json`` are disabled when true.
@@ -134,6 +140,10 @@ class Settings(BaseSettings):
     @property
     def audio_path(self) -> Path:
         return self.resolve_path(self.audio_dir)
+
+    @property
+    def media_path(self) -> Path:
+        return self.resolve_path(self.media_dir)
 
 
 @functools.lru_cache(maxsize=1)

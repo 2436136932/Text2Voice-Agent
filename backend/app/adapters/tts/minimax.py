@@ -14,6 +14,8 @@ from app.adapters.base import (
     TTSAdapter,
     TTSRequest,
     TTSResult,
+    VoiceCloneRequest,
+    VoiceCloneResult,
     VoiceInfo,
     request_json,
 )
@@ -25,6 +27,26 @@ from app.core.security import assert_credential
 logger = get_logger(__name__)
 
 FORMAT_MAP = {"mp3": "mp3", "pcm": "pcm", "flac": "flac", "wav": "wav"}
+
+#: ``{base}/files/upload`` and ``{base}/voice_clone`` both hang off the same
+#: API root as ``t2a_v2``; we derive it from the configured endpoint so a
+#: self-hosted proxy keeps working.
+_DEFAULT_API_ROOT = "https://api.minimax.chat/v1"
+
+
+def _safe_voice_id(name: str) -> str:
+    """Derive a vendor-legal ``voice_id`` from the user's display name.
+
+    MiniMax restricts voice ids to letters, digits and ``-``/``_`` (and caps
+    the length), so a raw Chinese display name cannot be sent verbatim.
+    """
+    ascii_name = "".join(ch if (ch.isalnum() and ch.isascii()) or ch in "-_" else "_" for ch in name)
+    ascii_name = ascii_name.strip("_-")[:50]
+    if not ascii_name:
+        import uuid
+
+        ascii_name = f"voice_{uuid.uuid4().hex[:12]}"
+    return ascii_name
 
 
 class MiniMaxTTSAdapter(TTSAdapter):
@@ -41,6 +63,18 @@ class MiniMaxTTSAdapter(TTSAdapter):
     speed_max = 2.0
     formats = ("mp3", "pcm", "flac", "wav")
     max_chars = 5000
+    # -- voice cloning ------------------------------------------------------
+    supports_voice_clone = True
+    supports_reference_audio = False
+    clone_models = (
+        {"id": "speech-01-turbo", "name": "speech-01-turbo (克隆音色推荐)"},
+        {"id": "speech-01-240228", "name": "speech-01-240228 (克隆音色·稳定版)"},
+    )
+    clone_hint = (
+        "MiniMax 克隆需要先在高级设置中填写 GroupId；"
+        "参考音频建议 10 秒以上、单人、无背景音乐。"
+        "克隆完成后返回的 voice_id 会出现在音色列表的「我的音色」中。"
+    )
     voices = (
         VoiceInfo(id="female-shaonv", name="少女 (女)", gender="female", language="zh-CN", description="清脆少女音"),
         VoiceInfo(id="female-yujie", name="御姐 (女)", gender="female", language="zh-CN", description="成熟女声"),
@@ -179,6 +213,144 @@ class MiniMaxTTSAdapter(TTSAdapter):
             latency_ms=latency_ms,
             content_type=self.content_type_for(audio_format),
             duration_ms=duration_ms,
+        )
+
+    def _api_root(self, base_url: str | None) -> str:
+        """API root that ``files/upload`` and ``voice_clone`` hang off.
+
+        The configured endpoint points at ``.../t2a_v2``; the clone endpoints
+        live next to it, so strip the trailing ``t2a_v2`` when present.
+        """
+        resolved = self.resolve_base_url(base_url)
+        suffix = "/t2a_v2"
+        if resolved.endswith(suffix):
+            return resolved[: -len(suffix)]
+        return resolved or _DEFAULT_API_ROOT
+
+    async def clone_voice(self, request: VoiceCloneRequest) -> VoiceCloneResult:
+        """Clone in two steps: upload the clip, then register it as a voice.
+
+        MiniMax cannot clone straight from bytes - the file has to exist
+        server-side first and be referenced by ``file_id``. Both calls are
+        implemented here so a single ``POST /voices/clone`` from the UI does
+        the whole dance.
+        """
+        api_key = assert_credential(request.api_key, kind="tts", provider=self.id)
+        if not request.audio:
+            raise AppError(
+                ErrorCode.VOICE_CLONE_FAILED,
+                "参考音频为空，无法克隆。",
+                detail={
+                    "provider": self.id,
+                    "suggestion": "请上传一段 10 秒以上的单人清晰语音后重试。",
+                },
+            )
+
+        group_id = str(request.extra.get("group_id") or "").strip()
+        root = self._api_root(request.base_url)
+        headers = {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
+        base_resp_hint = {
+            "provider": self.id,
+            "suggestion": (
+                "请检查 API Key 是否正确、以及是否已在高级设置中填写 GroupId"
+                "（MiniMax 控制台 → 账户管理 → 基本信息）。"
+            ),
+        }
+
+        # -- step 1: upload the reference clip ------------------------------
+        upload_url = f"{root}/files/upload"
+        if group_id:
+            upload_url = f"{upload_url}?GroupId={group_id}"
+        upload_body, _ = await request_json(
+            method="POST",
+            url=upload_url,
+            kind="tts",
+            provider=self.id,
+            headers=headers,
+            data={"purpose": "voice_clone"},
+            files={
+                "file": (
+                    request.audio_filename or "reference.wav",
+                    request.audio,
+                    "application/octet-stream",
+                )
+            },
+            timeout=settings.tts_timeout_seconds,
+        )
+
+        if not isinstance(upload_body, dict):
+            raise AppError(
+                ErrorCode.VOICE_CLONE_FAILED,
+                "MiniMax 文件上传返回了非预期的响应格式。",
+                detail={**base_resp_hint},
+            )
+
+        upload_status = (upload_body.get("base_resp") or {}).get("status_code")
+        if upload_status not in (0, None):
+            message = (upload_body.get("base_resp") or {}).get("status_msg") or "未知错误"
+            raise AppError(
+                ErrorCode.VOICE_CLONE_FAILED,
+                f"MiniMax 参考音频上传失败：{message}",
+                detail={**base_resp_hint, "upstream_code": upload_status},
+            )
+
+        file_id = str((upload_body.get("file") or {}).get("file_id") or "").strip()
+        if not file_id:
+            # Some responses return the id at the top level instead.
+            file_id = str(upload_body.get("file_id") or "").strip()
+        if not file_id:
+            raise AppError(
+                ErrorCode.VOICE_CLONE_FAILED,
+                "MiniMax 未返回 file_id，参考音频上传失败。",
+                detail={**base_resp_hint},
+            )
+
+        # -- step 2: register the cloned voice -------------------------------
+        clone_url = f"{root}/voice_clone"
+        if group_id:
+            clone_url = f"{clone_url}?GroupId={group_id}"
+        clone_body, _ = await request_json(
+            method="POST",
+            url=clone_url,
+            kind="tts",
+            provider=self.id,
+            headers={**headers, "Content-Type": "application/json"},
+            json_body={"file_id": file_id, "voice_id": _safe_voice_id(request.name)},
+            timeout=settings.tts_timeout_seconds,
+        )
+
+        if not isinstance(clone_body, dict):
+            raise AppError(
+                ErrorCode.VOICE_CLONE_FAILED,
+                "MiniMax 克隆接口返回了非预期的响应格式。",
+                detail={**base_resp_hint},
+            )
+
+        clone_status = (clone_body.get("base_resp") or {}).get("status_code")
+        if clone_status not in (0, None):
+            message = (clone_body.get("base_resp") or {}).get("status_msg") or "未知错误"
+            raise AppError(
+                ErrorCode.VOICE_CLONE_FAILED,
+                f"MiniMax 声音克隆失败：{message}",
+                detail={**base_resp_hint, "upstream_code": clone_status},
+            )
+
+        voice_id = str(clone_body.get("voice_id") or "").strip()
+        if not voice_id:
+            raise AppError(
+                ErrorCode.VOICE_CLONE_FAILED,
+                "MiniMax 未返回 voice_id，克隆失败。",
+                detail={**base_resp_hint},
+            )
+
+        duration_ms = request.extra.get("duration_ms")
+        return VoiceCloneResult(
+            voice_id=voice_id,
+            provider=self.id,
+            name=request.name,
+            model=request.model or "speech-01-turbo",
+            duration_ms=int(duration_ms) if isinstance(duration_ms, (int, float)) else None,
+            extra={"file_id": file_id},
         )
 
     def describe(self) -> dict:

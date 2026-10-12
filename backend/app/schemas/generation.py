@@ -54,6 +54,9 @@ class VoiceSchema(BaseModel):
     gender: str = "neutral"
     language: str = "multi"
     description: str = ""
+    #: True for voices the user cloned through this app. The UI groups these
+    #: under "我的音色" and shows the delete action.
+    cloned: bool = False
 
 
 class ModelSchema(BaseModel):
@@ -84,6 +87,11 @@ class ProviderSchema(BaseModel):
     formats: list[str] = Field(default_factory=list)
     max_chars: int | None = None
     default_region: str | None = None
+    #: Voice-cloning capabilities (see ``app/services/voices.py``).
+    supports_voice_clone: bool = False
+    supports_reference_audio: bool = False
+    clone_models: list[ModelSchema] = Field(default_factory=list)
+    clone_hint: str = ""
     #: Provider specific credential fields (e.g. Azure region, Volcengine app_id).
     extra_fields: list[dict[str, Any]] = Field(default_factory=list)
 
@@ -190,6 +198,11 @@ class GenerateOptionsSchema(BaseSchema):
     fallback_enabled: bool = True
     #: Reuse a previous reply verbatim and only re-synthesize audio.
     reuse_reply_text: str | None = Field(default=None, max_length=20000)
+    #: Uploaded reference clip (``POST /media/inspect``) to use as the voice
+    #: for this generation. Interpreted differently per provider:
+    #: a real clone id is preferred, otherwise the clip is forwarded at
+    #: synthesis time (see ``TTSAdapter.supports_reference_audio``).
+    reference_media_id: str | None = Field(default=None, max_length=64)
 
 
 class GenerateRequest(BaseSchema):
@@ -433,3 +446,99 @@ class MetricsResponse(BaseModel):
     generations_degraded: int
     active_tasks: int
     provider_calls: dict[str, int] = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Media (upload / inspect / trim)
+# ---------------------------------------------------------------------------
+class MediaInspectResponse(BaseModel):
+    """Metadata for one stored upload."""
+
+    media_id: str
+    filename: str
+    content_type: str
+    #: ``"audio"`` or ``"video"``.
+    kind: Literal["audio", "video"] = "audio"
+    size_bytes: int
+    duration_ms: int | None = None
+    sample_rate: int | None = None
+    channels: int | None = None
+    format: str = ""
+    #: Whether ``POST /media/trim`` can handle this file right now.
+    trimmable: bool = False
+    #: Ready-to-use URL for ``<audio src>`` / ``<video src>``.
+    preview_url: str = ""
+    #: Non-fatal problems (e.g. "视频需要 ffmpeg 才能提取音轨").
+    warnings: list[str] = Field(default_factory=list)
+
+
+class MediaTrimRequest(BaseSchema):
+    """Body of ``POST /media/trim``."""
+
+    media_id: str = Field(min_length=1, max_length=64)
+    start_ms: int = Field(ge=0, le=86_400_000, description="裁剪起点（毫秒）")
+    end_ms: int = Field(ge=1, le=86_400_000, description="裁剪终点（毫秒，不含）")
+    output_format: Literal["wav"] = "wav"
+
+    @model_validator(mode="after")
+    def _ordered_range(self) -> "MediaTrimRequest":
+        if self.end_ms <= self.start_ms:
+            raise ValueError("end_ms 必须大于 start_ms")
+        if self.end_ms - self.start_ms > 600_000:
+            raise ValueError("单次裁剪区间不能超过 10 分钟（600000 毫秒）")
+        return self
+
+
+class MediaTrimResponse(BaseModel):
+    media_id: str
+    preview_url: str
+    duration_ms: int | None = None
+    size_bytes: int = 0
+    format: str = "wav"
+
+
+# ---------------------------------------------------------------------------
+# Voice cloning
+# ---------------------------------------------------------------------------
+class VoiceCloneRequestSchema(BaseSchema):
+    """Body of ``POST /voices/clone``.
+
+    ``api_key`` is a ``SecretStr``: it is forwarded to the vendor for this one
+    call and never persisted (``cloned_voices`` has no credential column).
+    """
+
+    provider: str = Field(min_length=1, max_length=32)
+    name: str = Field(min_length=1, max_length=80, description="音色名称（用户可见）")
+    media_id: str = Field(min_length=1, max_length=64, description="参考音频的 media_id")
+    api_key: SecretStr | None = None
+    base_url: str | None = Field(default=None, max_length=512)
+    model: str | None = Field(default=None, max_length=128)
+    extra: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("base_url")
+    @classmethod
+    def _validate_base_url(cls, value: str | None) -> str | None:
+        return validate_base_url(value)
+
+    @field_validator("name")
+    @classmethod
+    def _non_blank_name(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("音色名称不能为空")
+        return value.strip()
+
+
+class ClonedVoiceResponse(BaseModel):
+    """One cloned voice; ``duration_ms`` is the reference clip's length."""
+
+    id: int
+    voice_id: str
+    provider: str
+    name: str
+    model: str = ""
+    created_at: datetime | None = None
+    duration_ms: int | None = None
+
+
+class VoiceListResponse(BaseModel):
+    items: list[ClonedVoiceResponse] = Field(default_factory=list)

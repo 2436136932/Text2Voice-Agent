@@ -1,20 +1,27 @@
 <script setup lang="ts">
 /**
- * `/settings` — server-side defaults (GET/PUT `/settings`) plus a local
- * credential panel that wipes keys from the config store and localStorage.
+ * `/settings` — the single place where everything is configured.
  *
- * API keys are never part of this payload: the backend settings endpoint has no
- * credential fields at all.
+ * Page order mirrors the user's mental model:
+ *   1. 服务商与密钥  — LLM + TTS provider, key, model, voice, clone manager
+ *   2. 默认参数      — the defaults the generate page starts from
+ *   3. 请求与保存    — history / credential persistence / timeout
+ *   4. 本机凭据      — what is currently held in this browser, and how to wipe it
+ *
+ * Credentials are never sent to `PUT /settings` (the backend schema has no
+ * credential field at all); they travel only to the endpoints that call a
+ * vendor, and reach localStorage only when the user opts in below.
  */
 import { computed, onMounted, reactive, ref } from 'vue'
-import { Delete, InfoFilled, Refresh, Select } from '@element-plus/icons-vue'
+import { Delete, InfoFilled, Refresh, Setting } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import ErrorAlert from '@/components/ErrorAlert.vue'
+import ProviderSettingsPanel from '@/components/ProviderSettingsPanel.vue'
+import VoiceClonePanel from '@/components/VoiceClonePanel.vue'
 import { ApiError } from '@/api/http'
 import type { UpdateSettingsRequest } from '@/api/types'
 import { useConfigStore } from '@/stores/config'
 import { useSettingsStore } from '@/stores/settings'
-import { genderLabel } from '@/utils/format'
 
 const settingsStore = useSettingsStore()
 const configStore = useConfigStore()
@@ -35,12 +42,12 @@ interface SettingsForm {
 
 function emptyForm(): SettingsForm {
   return {
-    default_llm_provider: 'openai',
-    default_llm_model: 'gpt-4o-mini',
-    default_tts_provider: 'openai',
-    default_tts_voice: 'alloy',
+    default_llm_provider: '',
+    default_llm_model: '',
+    default_tts_provider: '',
+    default_tts_voice: '',
     default_speed: 1.0,
-    default_system_prompt: '你是一个乐于助人的助手。',
+    default_system_prompt: '你是一个乐于助人的中文助手，回答简洁、口语化，适合朗读。',
     auto_save_history: true,
     auto_save_credentials: false,
     request_timeout_seconds: 120,
@@ -50,8 +57,8 @@ function emptyForm(): SettingsForm {
 const form = reactive<SettingsForm>(emptyForm())
 const formError = ref<ApiError | null>(null)
 const loading = ref(false)
+const saving = ref(false)
 
-/** Copy the store's settings into the local form. */
 function syncFormFromStore(): void {
   const settings = settingsStore.effective
   form.default_llm_provider = settings.default_llm_provider
@@ -65,7 +72,6 @@ function syncFormFromStore(): void {
   form.request_timeout_seconds = settings.request_timeout_seconds
 }
 
-/** Build the partial payload sent to `PUT /settings`. */
 function buildPatch(): UpdateSettingsRequest {
   return {
     default_llm_provider: form.default_llm_provider,
@@ -77,12 +83,15 @@ function buildPatch(): UpdateSettingsRequest {
     auto_save_history: form.auto_save_history,
     auto_save_credentials: form.auto_save_credentials,
     request_timeout_seconds: form.request_timeout_seconds,
+    // Staged from the provider panels via "设为默认".
+    ...settingsStore.defaultsPatch(),
   }
 }
 
 onMounted(async () => {
   loading.value = true
   formError.value = null
+  await configStore.loadProviders()
   const settings = await settingsStore.load()
   if (settings) syncFormFromStore()
   else if (settingsStore.error) {
@@ -92,8 +101,6 @@ onMounted(async () => {
 })
 
 /* -------------------------------- actions -------------------------------- */
-
-const saving = ref(false)
 
 async function handleSave(): Promise<void> {
   if (form.request_timeout_seconds < 5 || form.request_timeout_seconds > 1800) {
@@ -112,13 +119,14 @@ async function handleSave(): Promise<void> {
       ElMessage.error('保存设置失败')
       return
     }
-    // Keep the local credential-persistence mirror aligned with the server value.
     settingsStore.setAutoSaveCredentials(updated.auto_save_credentials)
     if (updated.auto_save_credentials) configStore.persistCredentials()
     else configStore.clearCredentials()
-    // Seed the generation form with the new defaults.
+
+    settingsStore.clearPendingDefaults()
     configStore.applyDefaults(updated)
     syncFormFromStore()
+    hasCachedCredentials.value = configStore.hasCachedCredentials()
     ElMessage.success('设置已保存')
   } finally {
     saving.value = false
@@ -136,6 +144,7 @@ async function handleReset(): Promise<void> {
     return
   }
   loading.value = true
+  settingsStore.clearPendingDefaults()
   const settings = await settingsStore.load()
   if (settings) syncFormFromStore()
   loading.value = false
@@ -166,7 +175,6 @@ async function handleClearCredentials(): Promise<void> {
   ElMessage.success('本地凭据已清除')
 }
 
-/** React to the auto-save switch: persist or wipe immediately. */
 function handleAutoSaveChange(value: boolean): void {
   settingsStore.setAutoSaveCredentials(value)
   if (value) {
@@ -184,21 +192,31 @@ const llmProviders = computed(() => configStore.llmProviders)
 const ttsProviders = computed(() => configStore.ttsProviders)
 
 const llmModels = computed(() => {
-  const provider = llmProviders.value.find((item) => item.id === form.default_llm_provider)
+  const provider = llmProviders.value.find((item) => item.id === configStore.llmProviderId)
   return provider?.models ?? []
 })
 
 const ttsVoices = computed(() => {
-  const provider = ttsProviders.value.find((item) => item.id === form.default_tts_provider)
+  const provider = ttsProviders.value.find((item) => item.id === configStore.ttsProviderId)
   return provider?.voices ?? []
 })
 
 const ttsSpeedRange = computed<{ min: number; max: number }>(() => {
-  const provider = ttsProviders.value.find((item) => item.id === form.default_tts_provider)
+  const provider = ttsProviders.value.find((item) => item.id === configStore.ttsProviderId)
   return { min: provider?.speed_min ?? 0.25, max: provider?.speed_max ?? 4.0 }
 })
 
 const speedLabel = computed<string>(() => `${form.default_speed.toFixed(2)}x`)
+
+/** Push the currently selected provider/model/voice into the defaults form. */
+function useCurrentAsDefaults(): void {
+  form.default_llm_provider = configStore.llmProviderId
+  form.default_llm_model = configStore.llmModel
+  form.default_tts_provider = configStore.ttsProviderId
+  form.default_tts_voice = configStore.ttsVoice
+  form.default_system_prompt = configStore.systemPrompt
+  ElMessage.success('已同步当前配置到默认参数，别忘了点「保存设置」')
+}
 
 function handleLLMProviderChange(value: string): void {
   const provider = llmProviders.value.find((item) => item.id === value)
@@ -215,7 +233,9 @@ function handleTTSProviderChange(value: string): void {
   <div class="t2v-page settings-view">
     <div class="t2v-page__title">
       <h2>系统设置</h2>
-      <span class="t2v-page__subtitle">配置默认服务商、语音参数与请求行为。</span>
+      <span class="t2v-page__subtitle">
+        服务商、密钥、模型与音色都在这里配置；「语音生成」页只负责输入文本和点击生成。
+      </span>
     </div>
 
     <ErrorAlert
@@ -226,13 +246,39 @@ function handleTTSProviderChange(value: string): void {
       @dismiss="formError = null"
     />
 
-    <el-card v-loading="loading" shadow="never">
+    <!-- ================= 1. 服务商与密钥 ================= -->
+    <el-card shadow="never" class="settings-view__section">
+      <template #header>
+        <div class="settings-view__section-head">
+          <el-icon><Setting /></el-icon>
+          <span>服务商与密钥</span>
+          <span class="t2v-muted settings-view__section-note">
+            密钥仅保存在本机浏览器，不会写入后端数据库
+          </span>
+        </div>
+      </template>
+
+      <div class="t2v-grid t2v-grid--2">
+        <ProviderSettingsPanel kind="llm" />
+        <ProviderSettingsPanel kind="tts" />
+      </div>
+
+      <el-divider />
+
+      <VoiceClonePanel />
+    </el-card>
+
+    <!-- ================= 2. 默认参数 ================= -->
+    <el-card v-loading="loading" shadow="never" class="settings-view__section">
       <template #header>
         <div class="settings-view__header">
           <span>默认生成参数</span>
-          <span v-if="settingsStore.effective.updated_at" class="t2v-muted settings-view__updated">
-            最后更新：{{ settingsStore.effective.updated_at }}
-          </span>
+          <div class="settings-view__header-right">
+            <span v-if="settingsStore.effective.updated_at" class="t2v-muted settings-view__updated">
+              最后更新：{{ settingsStore.effective.updated_at }}
+            </span>
+            <el-button link size="small" @click="useCurrentAsDefaults">用当前配置填充</el-button>
+          </div>
         </div>
       </template>
 
@@ -245,12 +291,7 @@ function handleTTSProviderChange(value: string): void {
               placeholder="请选择服务商"
               @change="handleLLMProviderChange"
             >
-              <el-option
-                v-for="item in llmProviders"
-                :key="item.id"
-                :label="item.name"
-                :value="item.id"
-              />
+              <el-option v-for="item in llmProviders" :key="item.id" :label="item.name" :value="item.id" />
             </el-select>
           </el-form-item>
 
@@ -264,12 +305,7 @@ function handleTTSProviderChange(value: string): void {
               default-first-option
               :reserve-keyword="false"
             >
-              <el-option
-                v-for="item in llmModels"
-                :key="item.id"
-                :label="item.name"
-                :value="item.id"
-              />
+              <el-option v-for="item in llmModels" :key="item.id" :label="item.name" :value="item.id" />
             </el-select>
           </el-form-item>
 
@@ -280,50 +316,32 @@ function handleTTSProviderChange(value: string): void {
               placeholder="请选择服务商"
               @change="handleTTSProviderChange"
             >
-              <el-option
-                v-for="item in ttsProviders"
-                :key="item.id"
-                :label="item.name"
-                :value="item.id"
-              />
+              <el-option v-for="item in ttsProviders" :key="item.id" :label="item.name" :value="item.id" />
             </el-select>
           </el-form-item>
 
-          <el-form-item label="默认发音人">
+          <el-form-item label="默认音色">
             <el-select
               v-model="form.default_tts_voice"
               class="settings-view__control"
-              placeholder="请选择发音人"
+              placeholder="请选择音色"
               filterable
             >
-              <el-option
-                v-for="item in ttsVoices"
-                :key="item.id"
-                :label="item.name"
-                :value="item.id"
-              >
-                <span class="settings-view__option">
-                  <span>{{ item.name }}</span>
-                  <el-tag size="small" effect="plain" type="info">
-                    {{ genderLabel(item.gender) }}
-                  </el-tag>
-                </span>
-              </el-option>
+              <el-option v-for="item in ttsVoices" :key="item.id" :label="item.name" :value="item.id" />
             </el-select>
           </el-form-item>
         </div>
 
-        <el-form-item label="默认语速">
-          <div class="settings-view__slider-row">
-            <el-slider
-              v-model="form.default_speed"
-              class="settings-view__slider"
-              :min="ttsSpeedRange.min"
-              :max="ttsSpeedRange.max"
-              :step="0.05"
-            />
-            <span class="settings-view__value t2v-mono">{{ speedLabel }}</span>
-          </div>
+        <el-form-item :label="`默认语速（${speedLabel}）`">
+          <el-slider
+            v-model="form.default_speed"
+            :min="ttsSpeedRange.min"
+            :max="ttsSpeedRange.max"
+            :step="0.05"
+            show-input
+            :show-input-controls="false"
+            class="settings-view__slider"
+          />
         </el-form-item>
 
         <el-form-item label="默认系统提示词">
@@ -331,224 +349,167 @@ function handleTTSProviderChange(value: string): void {
             v-model="form.default_system_prompt"
             type="textarea"
             :rows="3"
-            maxlength="2000"
+            maxlength="4000"
             show-word-limit
-            resize="vertical"
-            placeholder="例如：你是一个乐于助人的助手。"
+            placeholder="告诉大模型应该如何回答，例如：回答简洁、口语化，适合朗读。"
           />
         </el-form-item>
+      </el-form>
+    </el-card>
 
-        <el-divider />
+    <!-- ================= 3. 请求与保存 ================= -->
+    <el-card shadow="never" class="settings-view__section">
+      <template #header>
+        <span>请求与保存</span>
+      </template>
 
-        <div class="t2v-grid t2v-grid--2">
-          <el-form-item label="自动保存历史记录">
-            <div class="settings-view__switch-row">
-              <el-switch v-model="form.auto_save_history" />
-              <span class="t2v-muted settings-view__switch-hint">
-                开启后，每次生成的结果会自动写入后端历史记录。
-              </span>
-            </div>
-          </el-form-item>
-
-          <el-form-item label="请求超时时间（秒）">
-            <el-input-number
-              v-model="form.request_timeout_seconds"
-              :min="5"
-              :max="1800"
-              :step="10"
-              controls-position="right"
-              class="settings-view__number"
-            />
-            <div class="settings-view__switch-hint t2v-muted">
-              同时作用于前端 axios 超时；后端默认 120 秒。
-            </div>
-          </el-form-item>
-        </div>
-
-        <el-form-item label="自动保存配置（API Key）">
-          <div class="settings-view__switch-row">
-            <el-switch
-              v-model="form.auto_save_credentials"
-              @change="handleAutoSaveChange(form.auto_save_credentials)"
-            />
-            <span class="t2v-muted settings-view__switch-hint">
-              默认关闭。开启后 API Key 会保存在本机浏览器中，便于下次直接使用。
-            </span>
+      <el-form label-position="top" @submit.prevent>
+        <el-form-item label="请求超时（秒）">
+          <el-input-number
+            v-model="form.request_timeout_seconds"
+            :min="5"
+            :max="1800"
+            :step="10"
+            controls-position="right"
+          />
+          <div class="settings-view__hint">
+            大模型 + 语音合成两步串行，长文本建议 120 秒以上。
           </div>
+        </el-form-item>
+
+        <el-form-item label="自动保存历史记录">
+          <el-switch v-model="form.auto_save_history" />
+        </el-form-item>
+
+        <el-form-item label="自动保存配置（保存 API Key 到本机浏览器）">
+          <el-switch
+            v-model="form.auto_save_credentials"
+            @change="(value: boolean) => handleAutoSaveChange(value)"
+          />
         </el-form-item>
 
         <el-alert
           v-if="form.auto_save_credentials"
-          class="settings-view__warning"
           type="warning"
           show-icon
           :closable="false"
-          title="安全提示：API Key 将以明文保存在本机 localStorage"
-        >
-          <ul class="settings-view__warning-list">
-            <li>localStorage 中的内容不会被加密，同一台电脑上的其他程序或用户可能读取到该 Key。</li>
-            <li>Key 只保存在当前浏览器，不会上传到后端，也不会写入 <code>/settings</code>。</li>
-            <li>请勿在公用 / 共享电脑上开启此选项；建议改用环境变量或密钥管理服务。</li>
-            <li>关闭该开关或点击下方的“清除本地凭据”即可立即删除。</li>
-          </ul>
-        </el-alert>
-
-        <div class="settings-view__actions">
-          <el-button type="primary" :icon="Select" :loading="saving" @click="handleSave">
-            保存
-          </el-button>
-          <el-button :icon="Refresh" :disabled="saving" @click="handleReset">重置</el-button>
-        </div>
+          title="开启后 API Key 会以明文写入本机 localStorage"
+          description="仅本机可读，但仍建议在公用电脑上关闭此选项。后端始终不会保存任何密钥。"
+        />
       </el-form>
     </el-card>
 
-    <el-card shadow="never">
+    <!-- ================= 4. 本机凭据 ================= -->
+    <el-card shadow="never" class="settings-view__section">
       <template #header>
-        <div class="settings-view__header">
-          <span>本地凭据</span>
-          <el-tag :type="hasCachedCredentials ? 'warning' : 'info'" size="small" effect="plain">
-            {{ hasCachedCredentials ? 'localStorage 中存在凭据' : '未保存任何凭据' }}
-          </el-tag>
-        </div>
+        <span>本机凭据</span>
       </template>
 
-      <div class="settings-view__credentials">
-        <el-descriptions :column="1" border size="small">
-          <el-descriptions-item label="大模型 API Key">
-            <el-tag :type="keyPresence.llm ? 'success' : 'info'" size="small" effect="plain">
-              {{ keyPresence.llm ? '已在内存中填写' : '未填写' }}
-            </el-tag>
-          </el-descriptions-item>
-          <el-descriptions-item label="语音合成 API Key">
-            <el-tag :type="keyPresence.tts ? 'success' : 'info'" size="small" effect="plain">
-              {{ keyPresence.tts ? '已在内存中填写' : '未填写' }}
-            </el-tag>
-          </el-descriptions-item>
-          <el-descriptions-item label="localStorage 键名">
-            <span class="t2v-mono">t2v:credentials</span>
-          </el-descriptions-item>
-        </el-descriptions>
+      <el-descriptions :column="1" border size="small">
+        <el-descriptions-item label="大模型 Key">
+          <el-tag :type="keyPresence.llm ? 'success' : 'info'" size="small" effect="plain">
+            {{ keyPresence.llm ? '已填写（仅内存）' : '未填写' }}
+          </el-tag>
+        </el-descriptions-item>
+        <el-descriptions-item label="语音合成 Key">
+          <el-tag :type="keyPresence.tts ? 'success' : 'info'" size="small" effect="plain">
+            {{ keyPresence.tts ? '已填写（仅内存）' : '未填写' }}
+          </el-tag>
+        </el-descriptions-item>
+        <el-descriptions-item label="localStorage 缓存">
+          <el-tag :type="hasCachedCredentials ? 'warning' : 'info'" size="small" effect="plain">
+            {{ hasCachedCredentials ? '存在已保存的 Key' : '无' }}
+          </el-tag>
+        </el-descriptions-item>
+      </el-descriptions>
 
-        <el-alert
-          class="settings-view__info"
-          type="info"
-          show-icon
-          :closable="false"
-          title="API Key 的处理方式"
-        >
-          <ul class="settings-view__warning-list">
-            <li>Key 由你在“语音生成”页输入，仅保存在当前页面内存（Pinia store）中。</li>
-            <li>每次请求随 body 发送给后端，用于调用对应服务商。</li>
-            <li>绝不会写入 <code>/settings</code>，也不会出现在任何日志中。</li>
-          </ul>
-        </el-alert>
-
-        <div class="settings-view__actions">
-          <el-button
-            type="danger"
-            plain
-            :icon="Delete"
-            :disabled="!hasCachedCredentials && !keyPresence.llm && !keyPresence.tts"
-            @click="handleClearCredentials"
-          >
-            清除本地凭据
-          </el-button>
-          <el-tooltip content="清除后需要重新输入 API Key" placement="top">
-            <el-icon class="settings-view__info-icon"><InfoFilled /></el-icon>
-          </el-tooltip>
-        </div>
+      <div class="settings-view__actions">
+        <el-button :icon="Delete" type="danger" plain @click="handleClearCredentials">
+          清除本地凭据
+        </el-button>
+        <el-tooltip content="密钥只在调用服务商时随请求发送，后端不落库、不写日志" placement="top">
+          <el-icon class="settings-view__info"><InfoFilled /></el-icon>
+        </el-tooltip>
       </div>
     </el-card>
+
+    <!-- ================= 保存 / 重置 ================= -->
+    <div class="settings-view__footer">
+      <el-button type="primary" size="large" :loading="saving" @click="handleSave">
+        保存设置
+      </el-button>
+      <el-button size="large" :icon="Refresh" :disabled="saving" @click="handleReset">
+        重置
+      </el-button>
+      <span class="t2v-muted">密钥不参与保存，只会保存在浏览器中。</span>
+    </div>
   </div>
 </template>
 
 <style scoped>
+.settings-view__section {
+  margin-bottom: 16px;
+}
+
+.settings-view__section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.settings-view__section-note {
+  font-weight: 400;
+  font-size: 12px;
+}
+
 .settings-view__header {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-view__header-right {
+  display: inline-flex;
+  align-items: center;
   gap: 10px;
-  flex-wrap: wrap;
 }
 
 .settings-view__updated {
   font-size: 12px;
-  font-weight: 400;
 }
 
 .settings-view__control {
   width: 100%;
 }
 
-.settings-view__option {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.settings-view__slider-row {
-  display: flex;
-  align-items: center;
-  gap: 16px;
+.settings-view__slider {
   width: 100%;
 }
 
-.settings-view__slider {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.settings-view__value {
-  flex: 0 0 auto;
-  min-width: 52px;
-  text-align: right;
-  font-weight: 600;
-  color: var(--t2v-text-secondary);
-}
-
-.settings-view__number {
-  width: 180px;
-}
-
-.settings-view__switch-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.settings-view__switch-hint {
+.settings-view__hint {
+  margin-top: 4px;
   font-size: 12px;
-  line-height: 1.5;
-}
-
-.settings-view__warning,
-.settings-view__info {
-  margin: 4px 0 16px;
-}
-
-.settings-view__warning-list {
-  margin: 6px 0 0;
-  padding-left: 18px;
-  line-height: 1.8;
+  color: var(--el-text-color-secondary);
 }
 
 .settings-view__actions {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-top: 8px;
-  flex-wrap: wrap;
+  margin-top: 14px;
 }
 
-.settings-view__credentials {
+.settings-view__info {
+  color: var(--el-text-color-secondary);
+  cursor: help;
+}
+
+.settings-view__footer {
   display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.settings-view__info-icon {
-  color: var(--t2v-text-muted);
+  align-items: center;
+  gap: 12px;
+  padding: 4px 0 24px;
 }
 </style>

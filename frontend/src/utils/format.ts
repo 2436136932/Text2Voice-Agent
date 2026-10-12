@@ -20,6 +20,19 @@ export function formatSeconds(ms: number | null | undefined, suffix = 's'): stri
   return `${(ms / 1000).toFixed(2)}${suffix}`
 }
 
+/**
+ * Format a millisecond duration as `m:ss.d` (or `s.ds` under a minute).
+ * Used for media clips where "0:04.2" reads better than "4.21s".
+ */
+export function formatDuration(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined || !Number.isFinite(ms)) return '—'
+  const totalSeconds = ms / 1000
+  if (totalSeconds < 60) return `${totalSeconds.toFixed(1)}s`
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds - minutes * 60
+  return `${minutes}:${seconds.toFixed(1).padStart(4, '0')}`
+}
+
 /** Format a byte count as `B` / `KB` / `MB`. */
 export function formatBytes(bytes: number | null | undefined): string {
   if (bytes === null || bytes === undefined || !Number.isFinite(bytes)) return '—'

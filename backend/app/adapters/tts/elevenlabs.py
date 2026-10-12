@@ -10,8 +10,11 @@ from app.adapters.base import (
     TTSAdapter,
     TTSRequest,
     TTSResult,
+    VoiceCloneRequest,
+    VoiceCloneResult,
     VoiceInfo,
     request_bytes,
+    request_json,
 )
 from app.core.config import settings
 from app.core.errors import AppError, ErrorCode
@@ -29,6 +32,9 @@ FORMAT_MAP = {
     "ulaw": "ulaw_8000",
 }
 
+#: ElevenLabs requires at least ~30s of clean speech for a good clone.
+CLONE_MIN_SECONDS = 30
+
 
 class ElevenLabsAdapter(TTSAdapter):
     id = "elevenlabs"
@@ -44,6 +50,19 @@ class ElevenLabsAdapter(TTSAdapter):
     speed_max = 1.2
     formats = ("mp3", "opus", "pcm")
     max_chars = 5000
+    # -- voice cloning ------------------------------------------------------
+    supports_voice_clone = True
+    supports_reference_audio = False
+    clone_models = (
+        {"id": "eleven_multilingual_v2", "name": "eleven_multilingual_v2 (克隆音色推荐)"},
+        {"id": "eleven_turbo_v2_5", "name": "eleven_turbo_v2_5 (克隆音色·低延迟)"},
+        {"id": "eleven_flash_v2_5", "name": "eleven_flash_v2_5 (克隆音色·最快)"},
+    )
+    clone_hint = (
+        "声音克隆请在「系统设置」把 TTS 模型切换为 eleven_multilingual_v2"
+        "（多语言克隆模型，音质最好），并使用 ≥30 秒的干净人声作为参考音频。"
+        "克隆完成后，返回的 voice_id 会出现在音色列表的「我的音色」中。"
+    )
     voices = (
         VoiceInfo(id="21m00Tcm4TlvDq8ikWAM", name="Rachel", gender="female", language="en", description="美式女声，自然"),
         VoiceInfo(id="EXAVITQu4vr4xnSDxMaL", name="Sarah", gender="female", language="en", description="柔和女声"),
@@ -136,6 +155,76 @@ class ElevenLabsAdapter(TTSAdapter):
             audio_format=audio_format,
             latency_ms=latency_ms,
             content_type=content_type or "audio/mpeg",
+        )
+
+    async def clone_voice(self, request: VoiceCloneRequest) -> VoiceCloneResult:
+        """``POST /voices/add`` - instant voice cloning from a reference clip.
+
+        ElevenLabs takes the clip as multipart form data and answers with the
+        new ``voice_id``, which is then usable exactly like a built-in voice.
+        """
+        api_key = assert_credential(request.api_key, kind="tts", provider=self.id)
+        if not request.audio:
+            raise AppError(
+                ErrorCode.VOICE_CLONE_FAILED,
+                "参考音频为空，无法克隆。",
+                detail={
+                    "provider": self.id,
+                    "suggestion": "请上传一段不少于 30 秒、无背景噪音的单人语音后重试。",
+                },
+            )
+
+        url = f"{self.resolve_base_url(request.base_url)}/voices/add"
+        headers = {"xi-api-key": api_key, "Accept": "application/json"}
+        # ``files`` triggers multipart encoding inside httpx.
+        files = {
+            "files": (
+                request.audio_filename or "reference.wav",
+                request.audio,  # raw bytes only ever go upstream, never to a log
+                "application/octet-stream",
+            )
+        }
+        data = {"name": request.name}
+        labels = request.extra.get("labels")
+        if isinstance(labels, dict) and labels:
+            import json
+
+            data["labels"] = json.dumps(labels, ensure_ascii=False)
+
+        body, _ = await request_json(
+            method="POST",
+            url=url,
+            kind="tts",
+            provider=self.id,
+            headers=headers,
+            data=data,
+            files=files,
+            timeout=settings.tts_timeout_seconds,
+        )
+
+        voice_id = ""
+        if isinstance(body, dict):
+            voice_id = str(body.get("voice_id") or "").strip()
+        if not voice_id:
+            raise AppError(
+                ErrorCode.VOICE_CLONE_FAILED,
+                "ElevenLabs 未返回 voice_id，克隆失败。",
+                detail={
+                    "provider": self.id,
+                    "suggestion": (
+                        "请确认参考音频格式受支持（wav/mp3，建议 30 秒以上、单人清晰人声），"
+                        "并确认账号的 Instant Voice Cloning 额度未用尽。"
+                    ),
+                },
+            )
+
+        duration_ms = request.extra.get("duration_ms")
+        return VoiceCloneResult(
+            voice_id=voice_id,
+            provider=self.id,
+            name=request.name,
+            model=request.model or "eleven_multilingual_v2",
+            duration_ms=int(duration_ms) if isinstance(duration_ms, (int, float)) else None,
         )
 
     def describe(self) -> dict:

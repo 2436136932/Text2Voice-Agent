@@ -49,6 +49,9 @@ export interface VoiceOption {
   name: string
   gender: VoiceGender
   language: string
+  description?: string
+  /** True for voices created in the voice-clone flow (stored locally). */
+  cloned?: boolean
 }
 
 export interface LLMProvider {
@@ -60,6 +63,10 @@ export interface LLMProvider {
   supports_base_url: boolean
   api_key_hint: string
   docs_url: string | null
+  /** Free-form Chinese description shown under the provider selector. */
+  notes?: string
+  /** False for locally hosted providers where the key may be left empty. */
+  requires_api_key?: boolean
 }
 
 export interface TTSProvider {
@@ -75,11 +82,117 @@ export interface TTSProvider {
   formats: string[]
   api_key_hint: string
   docs_url: string | null
+  notes?: string
+  requires_api_key?: boolean
+  /** Vendor exposes a real voice-clone API. */
+  supports_voice_clone?: boolean
+  /** Can take a reference clip at synthesis time (prompt-based cloning). */
+  supports_reference_audio?: boolean
+  /** Models that can be used for cloning. */
+  clone_models?: ModelOption[]
+  /** Friendly Chinese text telling the user which model to pick for cloning. */
+  clone_hint?: string
+  models?: ModelOption[]
+  max_chars?: number
 }
 
 export interface ProvidersResponse {
   llm: LLMProvider[]
   tts: TTSProvider[]
+}
+
+/* ------------------------------------------------------------------ */
+/* Runtime capabilities                                                */
+/* ------------------------------------------------------------------ */
+
+export interface FfmpegCapability {
+  available: boolean
+  path: string | null
+  version: string | null
+  message: string
+}
+
+export interface VoiceCloneCapability {
+  supported_providers: string[]
+  reference_audio_providers: string[]
+  note: string
+}
+
+export interface UploadCapability {
+  accept: string
+  max_size_mb: number
+  trimmable_formats: string[]
+  video_extraction_available: boolean
+}
+
+export interface CapabilitiesResponse {
+  ffmpeg: FfmpegCapability
+  voice_clone: VoiceCloneCapability
+  upload: UploadCapability
+}
+
+/* ------------------------------------------------------------------ */
+/* Media (upload / inspect / trim)                                     */
+/* ------------------------------------------------------------------ */
+
+export type MediaKind = 'audio' | 'video'
+
+export interface MediaInfo {
+  media_id: string
+  filename: string
+  content_type: string
+  kind: MediaKind
+  size_bytes: number
+  duration_ms: number | null
+  sample_rate: number | null
+  channels: number | null
+  format: string
+  trimmable: boolean
+  preview_url: string
+  warnings?: string[]
+}
+
+export interface TrimMediaRequest {
+  media_id: string
+  start_ms: number
+  end_ms: number
+  output_format?: string
+}
+
+export interface TrimMediaResponse {
+  media_id: string
+  preview_url: string
+  duration_ms: number | null
+  size_bytes: number
+  format: string
+}
+
+/* ------------------------------------------------------------------ */
+/* Cloned voices                                                       */
+/* ------------------------------------------------------------------ */
+
+export interface ClonedVoice {
+  id: number
+  voice_id: string
+  provider: string
+  name: string
+  model: string
+  duration_ms: number | null
+  created_at: string
+}
+
+export interface VoiceListResponse {
+  items: ClonedVoice[]
+}
+
+export interface CloneVoiceRequest {
+  provider: string
+  api_key: string
+  base_url?: string | null
+  name: string
+  media_id: string
+  model?: string | null
+  extra?: Record<string, unknown>
 }
 
 /* ------------------------------------------------------------------ */
@@ -144,6 +257,8 @@ export interface TTSRequestConfig {
   provider: string
   api_key: string
   voice: string
+  /** TTS model id — required by OpenAI-compatible endpoints (e.g. mimo-v2.5-tts). */
+  model: string
   speed: number
   format: string
   base_url: string | null
@@ -156,9 +271,15 @@ export interface GenerateOptions {
   fallback_enabled: boolean
   /**
    * When set, the backend skips the LLM entirely and synthesizes this text
-   * verbatim. Used by the "仅重新合成语音" action.
+   * verbatim. Used by the "仅重新合成语音" action and the 直接配音 mode.
    */
   reuse_reply_text?: string | null
+  /**
+   * Media id of a reference clip (uploaded audio/video) used for voice
+   * cloning. Only meaningful for providers that declare clone or
+   * reference-audio support.
+   */
+  reference_media_id?: string | null
 }
 
 export interface GenerateRequest {
@@ -178,6 +299,7 @@ export interface TaskSubmitResponse {
   status: TaskStatus
   stage: TaskStage
   progress: number
+  message: string
 }
 
 /** `GET /tasks/{task_id}` */

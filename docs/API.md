@@ -17,6 +17,7 @@ Base URL：`http://localhost:8000/api/v1`
 - [历史记录](#历史记录)
 - [音频](#音频)
 - [系统设置](#系统设置)
+- [媒体与声音克隆](#媒体与声音克隆)
 - [系统与元信息](#系统与元信息)
 - [完整调用示例](#完整调用示例)
 
@@ -467,6 +468,137 @@ curl -X PUT http://localhost:8000/api/v1/settings \
 
 ---
 
+## 媒体与声音克隆
+
+用于「声音克隆」模式：上传参考音频/视频 → （可选）裁剪 → 创建音色 → 用该音色朗读文本。
+
+### POST /media/inspect
+
+上传参考文件并读取元数据（multipart，字段名 `file`）。
+
+```bash
+curl -X POST http://localhost:8000/api/v1/media/inspect \
+  -F "file=@/path/to/reference.wav;type=audio/wav"
+```
+
+```json
+{
+  "media_id": "3f2b1a4c9d8e4f7ab6c51e2d3f4a5b6c",
+  "filename": "reference.wav",
+  "content_type": "audio/wav",
+  "kind": "audio",
+  "size_bytes": 96044,
+  "duration_ms": 3000,
+  "sample_rate": 16000,
+  "channels": 1,
+  "format": "wav",
+  "trimmable": true,
+  "preview_url": "/api/v1/media/3f2b1a4c…",
+  "warnings": []
+}
+```
+
+| 错误码 | 状态 | 说明 |
+| --- | --- | --- |
+| `MEDIA_UNSUPPORTED_FORMAT` | 400 | 扩展名不在白名单内 |
+| `MEDIA_TOO_LARGE` | 413 | 超过 `max_upload_mb`（默认 50） |
+
+两个错误都带 `detail.suggestion`，直接展示给用户即可。
+
+### POST /media/trim
+
+从已上传的文件中裁出 `[start_ms, end_ms)`，输出 WAV。
+
+```bash
+curl -X POST http://localhost:8000/api/v1/media/trim \
+  -H 'Content-Type: application/json' \
+  -d '{"media_id":"3f2b…","start_ms":500,"end_ms":1500,"output_format":"wav"}'
+```
+
+```json
+{
+  "media_id": "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d",
+  "preview_url": "/api/v1/media/9a8b…",
+  "duration_ms": 1000,
+  "size_bytes": 32044,
+  "format": "wav"
+}
+```
+
+* **WAV** 用 Python 标准库裁剪，精确且无依赖。
+* **其他格式**需要 ffmpeg；未安装时返回 `MEDIA_TRIM_UNSUPPORTED`(422)，带
+  `detail.install_hint` 与 `detail.suggestion`（含安装命令）。
+
+### GET /media/{media_id}
+
+流式返回上传/裁剪后的文件，供 `<audio>` / `<video>` 在线试听试看。
+支持 HTTP Range（拖动进度条）。不存在时返回 404 `MEDIA_NOT_FOUND`。
+
+### DELETE /media/{media_id}
+
+删除上传文件（同时删除元数据 sidecar）。返回 `204`。
+
+### POST /voices/clone
+
+用参考片段创建一个音色。**API Key 仅用于本次调用，不落库。**
+
+```bash
+curl -X POST http://localhost:8000/api/v1/voices/clone \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "provider": "elevenlabs",
+    "api_key": "...",
+    "name": "我的声音",
+    "media_id": "3f2b…",
+    "model": "eleven_multilingual_v2"
+  }'
+```
+
+```json
+{
+  "id": 1,
+  "voice_id": "21m00Tcm4TlvDq8ikWAM",
+  "provider": "elevenlabs",
+  "name": "我的声音",
+  "model": "eleven_multilingual_v2",
+  "duration_ms": 3000,
+  "created_at": "2026-10-12T23:00:00+08:00"
+}
+```
+
+服务商不支持克隆时返回 `VOICE_CLONE_UNSUPPORTED`(400)，其 `detail.suggestion`
+会明确告知可以改用哪些服务商。
+
+创建后的音色会出现在 `GET /providers` 对应 TTS 条目的 `voices[]` 中，并标记
+`"cloned": true`，可直接用于生成。
+
+### GET /voices · DELETE /voices/{id}
+
+```json
+{ "items": [ { "id": 1, "voice_id": "...", "provider": "...", "name": "...", "model": "", "duration_ms": 3000, "created_at": "..." } ] }
+```
+
+`DELETE /voices/{id}` → `204`。
+
+### 参考音频直传（无需克隆接口的服务商）
+
+对声明了 `supports_reference_audio` 的服务商（如 `custom`），可以在生成请求里
+直接带参考片段：
+
+```json
+{
+  "text": "用这个声音朗读这句话",
+  "llm": { "provider": "mock" },
+  "tts": { "provider": "custom", "api_key": "...", "model": "mimo-v2.5-tts", "base_url": "https://api.example.com/v1" },
+  "options": { "reference_media_id": "3f2b…" }
+}
+```
+
+若所选服务商既无克隆接口也不支持参考音频，返回 `TTS_REFERENCE_UNSUPPORTED`(400)
+并给出可操作建议。
+
+---
+
 ## 系统与元信息
 
 ### GET /health
@@ -484,6 +616,32 @@ curl -X PUT http://localhost:8000/api/v1/settings \
 ```
 
 `status` 为 `degraded` 时 `database` 字段给出失败原因。根路径 `/health` 同样可用（进程守护探针）。
+
+### GET /capabilities
+
+运行时能力探测。前端据此决定显示哪些功能、给出哪种提示（例如没装 ffmpeg 时提示只能裁剪 WAV）。
+
+```json
+{
+  "ffmpeg": {
+    "available": false,
+    "path": null,
+    "version": null,
+    "message": "未检测到 ffmpeg，仅支持 WAV 格式的裁剪与视频转音频。安装后自动启用：winget install Gyan.FFmpeg"
+  },
+  "voice_clone": {
+    "supported_providers": ["elevenlabs", "minimax"],
+    "reference_audio_providers": ["custom"],
+    "note": "支持克隆的服务商：ElevenLabs、MiniMax、以及任何实现了克隆接口的自定义端点"
+  },
+  "upload": {
+    "accept": ".aac,.avi,.flac,.m4a,.mkv,.mov,.mp3,.mp4,.ogg,.opus,.wav,.webm",
+    "max_size_mb": 50,
+    "trimmable_formats": ["wav"],
+    "video_extraction_available": false
+  }
+}
+```
 
 ### GET /meta/error-codes
 

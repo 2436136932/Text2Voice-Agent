@@ -236,4 +236,49 @@ class SettingModel(Base):
 # Backwards-friendly aliases used by ``app.db.__init__``.
 AppSetting = SettingModel
 
-__all__ = ["GenerationRecord", "TaskModel", "SettingModel", "AppSetting", "utcnow"]
+
+class ClonedVoice(Base):
+    """A voice created from a user-supplied reference clip.
+
+    As with every other table here there is **no credential column**: the API
+    key that performed the clone call is used for that request only.
+    """
+
+    __tablename__ = "cloned_voices"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    #: Vendor-side identifier returned by the clone API (or a synthetic id for
+    #: prompt-based cloning where the reference clip is re-sent every call).
+    voice_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    model: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    #: Uploaded clip this voice was derived from (may be purged later).
+    source_media_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    source_duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow, server_default=func.now()
+    )
+
+    __table_args__ = (Index("ix_cloned_voices_provider", "provider"),)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "voice_id": self.voice_id,
+            "provider": self.provider,
+            "name": self.name,
+            "model": self.model,
+            "duration_ms": self.source_duration_ms,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+__all__ = [
+    "GenerationRecord",
+    "TaskModel",
+    "SettingModel",
+    "ClonedVoice",
+    "AppSetting",
+    "utcnow",
+]

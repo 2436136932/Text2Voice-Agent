@@ -81,6 +81,9 @@ class VoiceInfo:
     description: str = ""
     #: Provider specific passthrough (e.g. Azure ``style``, Volcengine ``cluster``).
     extra: dict[str, Any] = field(default_factory=dict)
+    #: True for voices the user created through this app (see
+    #: :class:`app.db.models.ClonedVoice`); the UI groups them separately.
+    cloned: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -89,7 +92,40 @@ class VoiceInfo:
             "gender": self.gender,
             "language": self.language,
             "description": self.description,
+            "cloned": self.cloned,
         }
+
+
+@dataclass(slots=True)
+class VoiceCloneRequest:
+    """One vendor-side voice-cloning call.
+
+    ``audio`` holds the raw reference clip. It must never be logged - callers
+    log only ``len(audio)``.
+    """
+
+    api_key: str
+    name: str
+    audio: bytes
+    audio_filename: str = "reference.wav"
+    base_url: str | None = None
+    model: str = ""
+    #: Provider specific knobs (e.g. MiniMax ``group_id``, ElevenLabs ``labels``).
+    extra: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class VoiceCloneResult:
+    """Outcome of a successful clone call."""
+
+    voice_id: str
+    provider: str
+    name: str
+    model: str = ""
+    #: Vendor-reported duration of the reference clip, when it reports one.
+    duration_ms: int | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
+
 
 
 @dataclass(slots=True)
@@ -521,6 +557,18 @@ class TTSAdapter(BaseAdapter):
     formats: tuple[str, ...] = ("mp3",)
     #: Hard limit imposed by the vendor on a single synthesis call.
     max_chars: int = 4000
+    # -- voice cloning capabilities (see app/services/voices.py) -------------
+    #: True when the vendor exposes a real clone endpoint, so a clip is
+    #: uploaded once and the returned id can be reused for every synthesis.
+    supports_voice_clone: bool = False
+    #: Models that can be used for cloning, in the same
+    #: ``{"id": ..., "name": ...}`` shape as ``models``.
+    clone_models: tuple[dict[str, str], ...] = ()
+    #: Friendly, user-facing advice about which model to pick for cloning.
+    clone_hint: str = ""
+    #: True when a reference clip can be attached to a synthesis call instead of
+    #: being cloned up front (no vendor clone API involved).
+    supports_reference_audio: bool = False
     content_type_map: dict[str, str] = {
         "mp3": "audio/mpeg",
         "wav": "audio/wav",
@@ -536,6 +584,27 @@ class TTSAdapter(BaseAdapter):
     @abstractmethod
     async def synthesize(self, request: TTSRequest) -> TTSResult:
         """Synthesize speech or raise :class:`AppError`."""
+
+    async def clone_voice(self, request: VoiceCloneRequest) -> VoiceCloneResult:
+        """Create a reusable voice from a reference clip.
+
+        The default implementation refuses politely: cloning is an opt-in
+        capability, and a provider that has not implemented it must fail with a
+        message that tells the user which provider *can* do the job, rather
+        than with a generic 500. Adapters with a clone API override this and
+        set :attr:`supports_voice_clone`.
+        """
+        raise AppError(
+            ErrorCode.VOICE_CLONE_UNSUPPORTED,
+            f"{self.name} 暂未实现声音克隆接口。",
+            detail={
+                "provider": self.id,
+                "suggestion": (
+                    "请选择支持克隆的服务商（如 elevenlabs、minimax）后再试，"
+                    "或改用「参考音频」模式直接合成。"
+                ),
+            },
+        )
 
     def content_type_for(self, audio_format: str) -> str:
         return self.content_type_map.get(audio_format.lower(), "application/octet-stream")
@@ -608,6 +677,12 @@ class TTSAdapter(BaseAdapter):
                 "speed_max": self.speed_max,
                 "formats": list(self.formats),
                 "max_chars": self.max_chars,
+                # Cloning capabilities: the UI decides whether to show the
+                # "克隆音色" tab, and which model to preselect, from these.
+                "supports_voice_clone": self.supports_voice_clone,
+                "clone_models": list(self.clone_models),
+                "clone_hint": self.clone_hint,
+                "supports_reference_audio": self.supports_reference_audio,
             }
         )
         return payload

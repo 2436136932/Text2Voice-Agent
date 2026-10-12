@@ -28,6 +28,18 @@ export const CREDENTIALS_STORAGE_KEY = 't2v:credentials'
 /** Maximum accepted input length (mirrors the backend limit). */
 export const MAX_TEXT_LENGTH = 5000
 
+/**
+ * Generation modes.
+ *
+ * * `tts`     — plain text-to-speech: the LLM writes a reply and the TTS
+ *               provider speaks it.
+ * * `clone`   — voice cloning: a reference clip (audio or video) defines the
+ *               timbre, and the typed text is spoken in that voice.
+ * * `text2audio` — skip the LLM entirely and speak the typed text verbatim.
+ *               Useful when the user already has the exact script.
+ */
+export type GenerationMode = 'tts' | 'clone' | 'text2audio'
+
 /** Shape of the opt-in localStorage credential cache. */
 interface CachedCredentials {
   llmApiKey: string
@@ -57,8 +69,15 @@ export interface ConfigState {
   ttsApiKey: string
   ttsVoice: string
   ttsBaseUrl: string
+  /** Model id for OpenAI-compatible TTS endpoints (e.g. mimo-v2.5-tts). */
+  ttsModel: string
   speed: number
   format: string
+
+  /* generation mode */
+  mode: GenerationMode
+  /** Reference clip used for voice cloning (media id on the backend). */
+  referenceMediaId: string | null
 
   /* input */
   text: string
@@ -93,8 +112,12 @@ export const useConfigStore = defineStore('config', {
     ttsApiKey: '',
     ttsVoice: '',
     ttsBaseUrl: '',
+    ttsModel: '',
     speed: 1.0,
     format: 'mp3',
+
+    mode: 'tts',
+    referenceMediaId: null,
 
     text: '',
 
@@ -158,6 +181,31 @@ export const useConfigStore = defineStore('config', {
       return this.ttsProvider?.supports_speed ?? true
     },
 
+    /** Whether the selected TTS provider exposes a real voice-clone API. */
+    supportsVoiceClone(): boolean {
+      return this.ttsProvider?.supports_voice_clone ?? false
+    },
+
+    /** Whether the selected TTS provider can take a reference clip directly. */
+    supportsReferenceAudio(): boolean {
+      return this.ttsProvider?.supports_reference_audio ?? false
+    },
+
+    /** True when either cloning route is available for the current provider. */
+    supportsAnyCloning(): boolean {
+      return this.supportsVoiceClone || this.supportsReferenceAudio
+    },
+
+    /** Friendly hint telling the user which model to pick for cloning. */
+    cloneHint(): string {
+      return this.ttsProvider?.clone_hint ?? ''
+    },
+
+    /** Models the current TTS provider can use for cloning. */
+    cloneModels(): { id: string; name: string }[] {
+      return this.ttsProvider?.clone_models ?? []
+    },
+
     /** Effective base URL for the LLM request (`null` when unused). */
     llmBaseUrlOrNull(state): string | null {
       const value = state.llmBaseUrl.trim()
@@ -170,18 +218,30 @@ export const useConfigStore = defineStore('config', {
       return value.length > 0 ? value : null
     },
 
-    /** Whether every required field for generation is present. */
+    /**
+     * Whether every required field for the *current mode* is present.
+     *
+     * `clone` additionally needs a reference clip; `text2audio` does not need
+     * an LLM at all.
+     */
     canGenerate(state): boolean {
-      return (
-        state.text.trim().length > 0 &&
-        state.text.length <= MAX_TEXT_LENGTH &&
-        state.llmProviderId.length > 0 &&
-        state.llmApiKey.trim().length > 0 &&
-        state.llmModel.trim().length > 0 &&
-        state.ttsProviderId.length > 0 &&
-        state.ttsApiKey.trim().length > 0 &&
-        state.ttsVoice.trim().length > 0
-      )
+      if (state.text.trim().length === 0) return false
+      if (state.text.length > MAX_TEXT_LENGTH) return false
+      if (state.ttsProviderId.length === 0) return false
+      if (state.ttsVoice.trim().length === 0) return false
+
+      // LLM is required unless we are only voicing the text verbatim.
+      const needsLLM = state.mode !== 'text2audio'
+      if (needsLLM) {
+        if (state.llmProviderId.length === 0) return false
+        if (state.llmApiKey.trim().length === 0) return false
+        if (state.llmModel.trim().length === 0) return false
+      }
+
+      // Cloning needs a reference clip.
+      if (state.mode === 'clone' && !state.referenceMediaId) return false
+
+      return true
     },
 
     /** Human readable reasons explaining why generation is disabled. */
@@ -190,12 +250,20 @@ export const useConfigStore = defineStore('config', {
       if (state.text.trim().length === 0) reasons.push('请输入要生成的文本')
       if (state.text.length > MAX_TEXT_LENGTH) reasons.push(`文本长度不能超过 ${MAX_TEXT_LENGTH} 个字符`)
       if (!state.providersLoaded) reasons.push('服务商列表尚未加载完成')
-      if (state.llmProviderId.length === 0) reasons.push('请选择大模型服务商')
-      if (state.llmApiKey.trim().length === 0) reasons.push('请填写大模型 API Key')
-      if (state.llmModel.trim().length === 0) reasons.push('请选择或输入大模型名称')
-      if (state.ttsProviderId.length === 0) reasons.push('请选择语音合成服务商')
-      if (state.ttsApiKey.trim().length === 0) reasons.push('请填写语音合成 API Key')
-      if (state.ttsVoice.trim().length === 0) reasons.push('请选择发音人')
+
+      const needsLLM = state.mode !== 'text2audio'
+      if (needsLLM) {
+        if (state.llmProviderId.length === 0) reasons.push('请前往「系统设置」选择大模型服务商')
+        if (state.llmApiKey.trim().length === 0) reasons.push('请前往「系统设置」填写大模型 API Key')
+        if (state.llmModel.trim().length === 0) reasons.push('请前往「系统设置」选择大模型')
+      }
+
+      if (state.ttsProviderId.length === 0) reasons.push('请前往「系统设置」选择语音合成服务商')
+      if (state.ttsVoice.trim().length === 0) reasons.push('请前往「系统设置」选择音色')
+
+      if (state.mode === 'clone' && !state.referenceMediaId) {
+        reasons.push('声音克隆模式需要先上传一段参考音频或视频')
+      }
       return reasons
     },
   },
@@ -294,12 +362,23 @@ export const useConfigStore = defineStore('config', {
       if (!this.canGenerate) {
         throw new Error(this.disabledReasons.join('；') || '配置不完整')
       }
+
       const options: GenerateOptions = {
         auto_save: this.autoSave,
         include_audio_base64: this.includeAudioBase64,
         fallback_enabled: this.fallbackEnabled,
         ...overrides,
       }
+
+      // `clone` forwards the reference clip; `text2audio` skips the LLM by
+      // asking the backend to voice the typed text verbatim.
+      if (this.mode === 'clone' && this.referenceMediaId) {
+        options.reference_media_id = this.referenceMediaId
+      }
+      if (this.mode === 'text2audio') {
+        options.reuse_reply_text = this.text
+      }
+
       return {
         text: this.text,
         llm: {
@@ -315,6 +394,7 @@ export const useConfigStore = defineStore('config', {
           provider: this.ttsProviderId,
           api_key: this.ttsApiKey,
           voice: this.ttsVoice,
+          model: this.ttsModel,
           speed: this.speed,
           format: this.format,
           base_url: this.ttsBaseUrlOrNull,

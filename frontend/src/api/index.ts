@@ -5,6 +5,9 @@
  */
 import { del, get, http, post, put } from './http'
 import type {
+  CapabilitiesResponse,
+  CloneVoiceRequest,
+  ClonedVoice,
   DeleteHistoryBulkRequest,
   DeleteHistoryBulkResponse,
   FetchModelsRequest,
@@ -15,13 +18,17 @@ import type {
   HistoryDetail,
   HistoryListResponse,
   HistoryQuery,
+  MediaInfo,
   ProvidersResponse,
   ServerSettings,
   TaskStatusResponse,
   TaskSubmitResponse,
+  TrimMediaRequest,
+  TrimMediaResponse,
   UpdateSettingsRequest,
   ValidateProviderRequest,
   ValidateProviderResponse,
+  VoiceListResponse,
 } from './types'
 
 export * from './types'
@@ -56,6 +63,68 @@ export function validateProvider(payload: ValidateProviderRequest): Promise<Vali
 /** `POST /providers/models` — fetch model list from a custom OpenAI-compatible endpoint. */
 export function fetchModels(payload: FetchModelsRequest): Promise<FetchModelsResponse> {
   return post<FetchModelsResponse>('/providers/models', payload)
+}
+
+/* ------------------------------------------------------------------ */
+/* Capabilities                                                        */
+/* ------------------------------------------------------------------ */
+
+/** `GET /capabilities` — runtime probe (ffmpeg availability, clone support). */
+export function fetchCapabilities(): Promise<CapabilitiesResponse> {
+  return get<CapabilitiesResponse>('/capabilities')
+}
+
+/* ------------------------------------------------------------------ */
+/* Media (upload / inspect / trim)                                     */
+/* ------------------------------------------------------------------ */
+
+/** `POST /media/inspect` — upload a file and read its metadata. */
+export async function inspectMedia(file: File, onProgress?: (percent: number) => void): Promise<MediaInfo> {
+  const form = new FormData()
+  form.append('file', file)
+  const response = await http.post<MediaInfo>('/media/inspect', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    onUploadProgress: (event) => {
+      if (!onProgress || !event.total) return
+      onProgress(Math.round((event.loaded / event.total) * 100))
+    },
+  })
+  return response.data
+}
+
+/** `POST /media/trim` — cut a window out of an uploaded file. */
+export function trimMedia(payload: TrimMediaRequest): Promise<TrimMediaResponse> {
+  return post<TrimMediaResponse>('/media/trim', payload)
+}
+
+/** `DELETE /media/{id}` — discard an uploaded file. */
+export function deleteMedia(mediaId: string): Promise<void> {
+  return del<void>(`/media/${encodeURIComponent(mediaId)}`)
+}
+
+/** Absolute URL for previewing uploaded / trimmed media in `<audio>`/`<video>`. */
+export function mediaUrl(previewUrl: string): string {
+  const base = import.meta.env.VITE_API_BASE_URL || '/api/v1'
+  return previewUrl.startsWith('/api/') ? previewUrl : `${base}${previewUrl.replace(/^\/api\/v1/, '')}`
+}
+
+/* ------------------------------------------------------------------ */
+/* Cloned voices                                                       */
+/* ------------------------------------------------------------------ */
+
+/** `GET /voices` — locally stored cloned voices (never contains keys). */
+export function fetchVoices(): Promise<VoiceListResponse> {
+  return get<VoiceListResponse>('/voices')
+}
+
+/** `POST /voices/clone` — create a voice from a reference clip. */
+export function cloneVoice(payload: CloneVoiceRequest): Promise<ClonedVoice> {
+  return post<ClonedVoice>('/voices/clone', payload)
+}
+
+/** `DELETE /voices/{id}` — remove a cloned voice. */
+export function deleteVoice(id: number): Promise<void> {
+  return del<void>(`/voices/${id}`)
 }
 
 /* ------------------------------------------------------------------ */

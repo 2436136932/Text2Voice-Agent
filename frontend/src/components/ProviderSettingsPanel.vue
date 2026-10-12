@@ -1,0 +1,614 @@
+<script setup lang="ts">
+/**
+ * Provider configuration panel — the single place where LLM/TTS providers,
+ * credentials, models and voices are configured.
+ *
+ * This used to be duplicated between the generate page cards and the settings
+ * page; it now lives here only, and both pages consume the same `config` store.
+ *
+ * Credential safety: keys stay in the Pinia store (memory) and reach
+ * localStorage only when the user explicitly enables "自动保存配置". The panel
+ * never sends a key to `/settings`.
+ */
+import { computed, ref } from 'vue'
+import {
+  ChatDotRound,
+  Connection,
+  Download,
+  Key,
+  Link,
+  Microphone,
+  QuestionFilled,
+  Star,
+} from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
+import { fetchModels, validateProvider } from '@/api'
+import { ApiError } from '@/api/http'
+import type { FetchedModel, ProviderKind, ValidateProviderRequest } from '@/api/types'
+import { useConfigStore } from '@/stores/config'
+import { useSettingsStore } from '@/stores/settings'
+import { genderLabel } from '@/utils/format'
+
+const props = defineProps<{ kind: ProviderKind }>()
+
+const configStore = useConfigStore()
+const settingsStore = useSettingsStore()
+
+const isLLM = computed(() => props.kind === 'llm')
+const title = computed(() => (isLLM.value ? '大模型服务商' : '语音合成服务商'))
+const icon = computed(() => (isLLM.value ? ChatDotRound : Microphone))
+
+const validating = ref(false)
+const fetchingModels = ref(false)
+const lastLatency = ref<number | null>(null)
+const fetchedModels = ref<FetchedModel[]>([])
+const advancedOpen = ref<string[]>([])
+
+/* ------------------------------ bound fields ----------------------------- */
+
+const providerId = computed<string>({
+  get: () => (isLLM.value ? configStore.llmProviderId : configStore.ttsProviderId),
+  set: (value) => {
+    if (isLLM.value) configStore.selectLLMProvider(value)
+    else configStore.selectTTSProvider(value)
+    lastLatency.value = null
+    fetchedModels.value = []
+  },
+})
+
+const apiKey = computed<string>({
+  get: () => (isLLM.value ? configStore.llmApiKey : configStore.ttsApiKey),
+  set: (value) => {
+    if (isLLM.value) configStore.llmApiKey = value
+    else configStore.ttsApiKey = value
+  },
+})
+
+const baseUrl = computed<string>({
+  get: () => (isLLM.value ? configStore.llmBaseUrl : configStore.ttsBaseUrl),
+  set: (value) => {
+    if (isLLM.value) configStore.llmBaseUrl = value
+    else configStore.ttsBaseUrl = value
+  },
+})
+
+const model = computed<string>({
+  get: () => configStore.llmModel,
+  set: (value) => {
+    configStore.llmModel = value
+  },
+})
+
+const voice = computed<string>({
+  get: () => configStore.ttsVoice,
+  set: (value) => {
+    configStore.ttsVoice = value
+  },
+})
+
+/* ------------------------------- metadata -------------------------------- */
+
+const options = computed(() => (isLLM.value ? configStore.llmProviders : configStore.ttsProviders))
+const current = computed(() => (isLLM.value ? configStore.llmProvider : configStore.ttsProvider))
+
+const supportsBaseUrl = computed(() => current.value?.supports_base_url ?? false)
+const requiresBaseUrl = computed(() => current.value?.requires_base_url ?? false)
+const docsUrl = computed(() => current.value?.docs_url ?? null)
+const apiKeyPlaceholder = computed(() => current.value?.api_key_hint || '请输入 API Key')
+
+/** True when the key field can be left empty (local/offline providers). */
+const keyOptional = computed(() => (current.value as { requires_api_key?: boolean } | null)?.requires_api_key === false)
+
+const isCustomProvider = computed(() => providerId.value === 'custom')
+
+/** Model list for the LLM selector (fetched list wins when present). */
+const modelChoices = computed(() => {
+  if (fetchedModels.value.length > 0) {
+    return fetchedModels.value.map((item) => ({ id: item.id, name: item.name }))
+  }
+  return configStore.llmModels
+})
+
+/** Voice list for the TTS selector. */
+const voiceChoices = computed(() => configStore.ttsVoices)
+
+/**
+ * For a custom TTS endpoint we surface the fetched list, marking which models
+ * declare TTS support so the user can pick the right one. For built-in
+ * providers we use whatever audio models the backend advertises.
+ */
+const ttsProviderModels = computed<{ id: string; name: string }[]>(() => {
+  const models = (current.value as { models?: { id: string; name: string }[] } | null)?.models
+  return models ?? []
+})
+
+const ttsModelOptions = computed<({ id: string; name: string; supports_tts?: boolean })[]>(() => {
+  if (isCustomProvider.value && fetchedModels.value.length > 0) return fetchedModels.value
+  return ttsProviderModels.value
+})
+
+/** Providers that advertise voice-clone support. */
+const cloneCapable = computed(
+  () => (current.value as { supports_voice_clone?: boolean } | null)?.supports_voice_clone === true,
+)
+
+const cloneHint = computed(
+  () => (current.value as { clone_hint?: string } | null)?.clone_hint ?? '',
+)
+
+/* ------------------------------- validation ------------------------------ */
+
+const canFetchModels = computed(
+  () =>
+    isCustomProvider.value &&
+    apiKey.value.trim().length > 0 &&
+    baseUrl.value.trim().length > 0,
+)
+
+const canValidate = computed(() => {
+  if (!providerId.value) return false
+  if (!keyOptional.value && apiKey.value.trim().length === 0) return false
+  if (requiresBaseUrl.value && baseUrl.value.trim().length === 0) return false
+  if (isLLM.value && model.value.trim().length === 0) return false
+  if (!isLLM.value && voice.value.trim().length === 0) return false
+  return true
+})
+
+const validateDisabledReason = computed(() => {
+  if (!providerId.value) return '请先选择服务商'
+  if (!keyOptional.value && apiKey.value.trim().length === 0) return '请先填写 API Key'
+  if (requiresBaseUrl.value && baseUrl.value.trim().length === 0) return '该服务商必须填写 Base URL'
+  if (isLLM.value && model.value.trim().length === 0) return '请先选择或输入模型名称'
+  if (!isLLM.value && voice.value.trim().length === 0) return '请先选择发音人或克隆音色'
+  return ''
+})
+
+const keyHint = computed(() =>
+  settingsStore.autoSaveCredentials
+    ? '已开启「自动保存配置」：Key 会以明文保存在本机 localStorage，仅本机可见。'
+    : 'Key 仅保存在浏览器内存中，刷新页面即失效，绝不会写入后端数据库或日志。',
+)
+
+/* -------------------------------- actions -------------------------------- */
+
+async function handleFetchModels(): Promise<void> {
+  if (!canFetchModels.value) {
+    ElMessage.warning('请先填写 Base URL 和 API Key')
+    return
+  }
+  fetchingModels.value = true
+  try {
+    const result = await fetchModels({
+      base_url: baseUrl.value.trim(),
+      api_key: apiKey.value,
+      kind: props.kind,
+    })
+    fetchedModels.value = result.models
+    if (result.models.length === 0) {
+      ElMessage.warning('端点返回了空模型列表')
+      return
+    }
+    const ttsModels = result.models.filter((item) => item.supports_tts)
+    if (!isLLM.value && ttsModels.length > 0) {
+      ElMessage.success(`获取到 ${result.models.length} 个模型，其中 ${ttsModels.length} 个支持语音合成（带 TTS 标记）`)
+    } else if (!isLLM.value) {
+      ElMessage.warning(`获取到 ${result.models.length} 个模型，但未识别到支持语音合成的模型。请确认该服务商提供 TTS 能力。`)
+    } else {
+      ElMessage.success(`获取到 ${result.models.length} 个模型`)
+    }
+  } catch (error) {
+    reportError(error, '获取模型失败')
+  } finally {
+    fetchingModels.value = false
+  }
+}
+
+async function handleValidate(): Promise<void> {
+  if (!canValidate.value) {
+    ElMessage.warning(validateDisabledReason.value)
+    return
+  }
+  validating.value = true
+  lastLatency.value = null
+
+  const payload: ValidateProviderRequest = {
+    kind: props.kind,
+    provider: providerId.value,
+    api_key: apiKey.value,
+    base_url: baseUrl.value.trim() || null,
+    model: isLLM.value ? model.value : null,
+    voice: isLLM.value ? null : voice.value,
+  }
+
+  try {
+    const result = await validateProvider(payload)
+    lastLatency.value = result.latency_ms
+    if (result.valid) {
+      const latency = result.latency_ms !== null ? `（${result.latency_ms} ms）` : ''
+      ElMessage.success(`连接成功：${result.provider}${latency}`)
+    } else {
+      ElMessage.error(result.message || '连接校验未通过')
+    }
+  } catch (error) {
+    reportError(error, '连接校验失败')
+  } finally {
+    validating.value = false
+  }
+}
+
+/** Surface `detail.suggestion` when the backend provided actionable advice. */
+function reportError(error: unknown, fallback: string): void {
+  if (error instanceof ApiError) {
+    const suggestion = (error.detail as { suggestion?: string } | undefined)?.suggestion
+    ElMessage.error({
+      message: `${error.message}${suggestion ? `\n${suggestion}` : ''}${error.code ? `\n[${error.code}]` : ''}`,
+      duration: 7000,
+      showClose: true,
+    })
+  } else {
+    ElMessage.error(fallback)
+  }
+}
+
+/** Mark the current selection as the default used by the generate page. */
+function setAsDefault(): void {
+  if (isLLM.value) {
+    settingsStore.pendingDefaults.llmProvider = providerId.value
+    settingsStore.pendingDefaults.llmModel = model.value
+  } else {
+    settingsStore.pendingDefaults.ttsProvider = providerId.value
+    settingsStore.pendingDefaults.ttsVoice = voice.value
+  }
+  ElMessage.success('已设为默认，保存设置后生效')
+}
+</script>
+
+<template>
+  <el-card class="provider-panel" shadow="never">
+    <template #header>
+      <div class="provider-panel__header">
+        <div class="provider-panel__header-left">
+          <el-icon class="provider-panel__icon"><component :is="icon" /></el-icon>
+          <span>{{ title }}</span>
+        </div>
+        <div class="provider-panel__header-right">
+          <el-tag v-if="lastLatency !== null" type="success" size="small" effect="plain">
+            {{ lastLatency }} ms
+          </el-tag>
+          <el-tooltip v-if="docsUrl" :content="`打开 ${current?.name ?? ''} 官方文档`" placement="top">
+            <el-button
+              tag="a"
+              :href="docsUrl"
+              target="_blank"
+              rel="noopener noreferrer"
+              link
+              size="small"
+              :icon="Link"
+            >
+              文档
+            </el-button>
+          </el-tooltip>
+        </div>
+      </div>
+    </template>
+
+    <el-form label-position="top" @submit.prevent>
+      <el-form-item label="服务商">
+        <el-select
+          v-model="providerId"
+          class="provider-panel__control"
+          placeholder="请选择服务商"
+          :loading="configStore.providersLoading"
+        >
+          <el-option v-for="item in options" :key="item.id" :label="item.name" :value="item.id">
+            <span class="provider-panel__option">
+              <span>{{ item.name }}</span>
+              <span class="provider-panel__option-id t2v-mono">{{ item.id }}</span>
+            </span>
+          </el-option>
+        </el-select>
+        <div v-if="current?.notes" class="provider-panel__hint">{{ current.notes }}</div>
+      </el-form-item>
+
+      <el-form-item>
+        <template #label>
+          <span class="provider-panel__label">
+            API Key
+            <el-tag v-if="keyOptional" size="small" type="info" effect="plain">可留空</el-tag>
+            <el-tooltip :content="keyHint" placement="top">
+              <el-icon class="provider-panel__label-icon"><QuestionFilled /></el-icon>
+            </el-tooltip>
+          </span>
+        </template>
+        <el-input
+          v-model="apiKey"
+          type="password"
+          show-password
+          clearable
+          autocomplete="off"
+          spellcheck="false"
+          :placeholder="apiKeyPlaceholder"
+          :prefix-icon="Key"
+          class="provider-panel__control"
+        />
+      </el-form-item>
+
+      <!-- LLM: model picker -->
+      <el-form-item v-if="isLLM" label="模型">
+        <div class="provider-panel__row">
+          <el-select
+            v-model="model"
+            class="provider-panel__control provider-panel__grow"
+            placeholder="请选择或输入模型名称"
+            filterable
+            allow-create
+            default-first-option
+            :reserve-keyword="false"
+          >
+            <el-option v-for="item in modelChoices" :key="item.id" :label="item.name" :value="item.id" />
+          </el-select>
+          <el-button
+            v-if="isCustomProvider"
+            :icon="Download"
+            :loading="fetchingModels"
+            :disabled="!canFetchModels"
+            @click="handleFetchModels"
+          >
+            获取模型
+          </el-button>
+        </div>
+      </el-form-item>
+
+      <!-- TTS: voice / model picker -->
+      <template v-else>
+        <el-form-item label="发音人 / 音色">
+          <div class="provider-panel__row">
+            <el-select
+              v-model="voice"
+              class="provider-panel__control provider-panel__grow"
+              placeholder="请选择发音人"
+              filterable
+              allow-create
+            >
+              <el-option v-for="item in voiceChoices" :key="item.id" :label="item.name" :value="item.id">
+                <span class="provider-panel__option">
+                  <span>{{ item.name }}</span>
+                  <span class="provider-panel__option-tags">
+                    <el-tag v-if="item.cloned" size="small" type="warning" effect="plain">克隆</el-tag>
+                    <el-tag size="small" effect="plain" type="info">{{ genderLabel(item.gender) }}</el-tag>
+                    <el-tag size="small" effect="plain" type="info">{{ item.language }}</el-tag>
+                  </span>
+                </span>
+              </el-option>
+            </el-select>
+          </div>
+          <div v-if="cloneHint" class="provider-panel__hint">{{ cloneHint }}</div>
+        </el-form-item>
+
+        <!-- TTS model: shown for custom endpoints (with TTS markers) and for
+             providers that declare their own audio models. -->
+        <el-form-item v-if="isCustomProvider || ttsProviderModels.length > 0" label="TTS 模型">
+          <div class="provider-panel__row">
+            <el-select
+              v-model="configStore.ttsModel"
+              class="provider-panel__control provider-panel__grow"
+              :placeholder="
+                isCustomProvider
+                  ? '点击「获取模型」拉取，或直接输入模型名'
+                  : '使用服务商默认模型'
+              "
+              filterable
+              allow-create
+              clearable
+            >
+              <el-option
+                v-for="item in ttsModelOptions"
+                :key="item.id"
+                :label="item.name"
+                :value="item.id"
+              >
+                <span class="provider-panel__option">
+                  <span>{{ item.name }}</span>
+                  <el-tag
+                    v-if="isCustomProvider && 'supports_tts' in item && item.supports_tts"
+                    size="small"
+                    type="success"
+                    effect="dark"
+                  >
+                    TTS
+                  </el-tag>
+                </span>
+              </el-option>
+            </el-select>
+            <el-button
+              v-if="isCustomProvider"
+              :icon="Download"
+              :loading="fetchingModels"
+              :disabled="!canFetchModels"
+              @click="handleFetchModels"
+            >
+              获取模型
+            </el-button>
+          </div>
+          <div v-if="isCustomProvider" class="provider-panel__hint">
+            带 <el-tag size="small" type="success" effect="dark">TTS</el-tag>
+            标记的模型支持语音合成，请从中选择（例如 mimo-v2.5-tts）。
+          </div>
+        </el-form-item>
+      </template>
+
+      <el-collapse v-model="advancedOpen" class="provider-panel__advanced">
+        <el-collapse-item name="advanced">
+          <template #title><span>高级设置</span></template>
+
+          <el-form-item>
+            <template #label>
+              <span class="provider-panel__label">
+                Base URL
+                <el-tag v-if="requiresBaseUrl" size="small" type="warning" effect="plain">必填</el-tag>
+                <el-tag v-else-if="!supportsBaseUrl" size="small" type="info" effect="plain">不支持</el-tag>
+              </span>
+            </template>
+            <el-input
+              v-model="baseUrl"
+              class="provider-panel__control"
+              :disabled="!supportsBaseUrl"
+              clearable
+              spellcheck="false"
+              placeholder="例如 https://api.example.com/v1"
+            />
+            <div class="provider-panel__hint">
+              使用自建 / 代理网关时填写，需包含版本路径（通常是 /v1）。
+            </div>
+          </el-form-item>
+
+          <el-form-item v-if="configStore.temperature !== undefined && isLLM" label="温度 (temperature)">
+            <el-slider v-model="configStore.temperature" :min="0" :max="2" :step="0.05" show-input />
+          </el-form-item>
+
+          <el-form-item v-if="isLLM" label="最大回复长度 (max tokens)">
+            <el-input-number
+              v-model="configStore.maxTokens"
+              :min="1"
+              :max="32768"
+              :step="128"
+              controls-position="right"
+            />
+          </el-form-item>
+
+          <el-form-item v-if="isLLM" label="系统提示词">
+            <el-input
+              v-model="configStore.systemPrompt"
+              type="textarea"
+              :rows="3"
+              maxlength="4000"
+              show-word-limit
+              placeholder="告诉大模型应该如何回答，例如：回答简洁、口语化，适合朗读。"
+            />
+          </el-form-item>
+
+          <el-form-item v-if="!isLLM" label="支持的音频格式">
+            <div class="provider-panel__tags">
+              <el-tag v-for="item in configStore.ttsFormats" :key="item" size="small" effect="plain">
+                {{ item }}
+              </el-tag>
+            </div>
+          </el-form-item>
+
+          <el-form-item v-if="!isLLM && cloneCapable" label="声音克隆">
+            <el-tag type="success" effect="plain" size="small">该服务商支持声音克隆</el-tag>
+          </el-form-item>
+        </el-collapse-item>
+      </el-collapse>
+
+      <div class="provider-panel__actions">
+        <el-tooltip
+          :content="validateDisabledReason || '校验凭据是否可用'"
+          placement="top"
+        >
+          <span>
+            <el-button
+              type="primary"
+              plain
+              :icon="Connection"
+              :loading="validating"
+              :disabled="!canValidate"
+              @click="handleValidate"
+            >
+              测试连接
+            </el-button>
+          </span>
+        </el-tooltip>
+        <el-button :icon="Star" @click="setAsDefault">设为默认</el-button>
+      </div>
+    </el-form>
+  </el-card>
+</template>
+
+<style scoped>
+.provider-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.provider-panel__header-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.provider-panel__header-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.provider-panel__icon {
+  color: var(--t2v-color-primary);
+}
+
+.provider-panel__control {
+  width: 100%;
+}
+
+.provider-panel__row {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  align-items: flex-start;
+}
+
+.provider-panel__grow {
+  flex: 1;
+}
+
+.provider-panel__option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.provider-panel__option-id {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.provider-panel__option-tags {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.provider-panel__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.provider-panel__label-icon {
+  color: var(--el-text-color-secondary);
+  cursor: help;
+}
+
+.provider-panel__hint {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--el-text-color-secondary);
+}
+
+.provider-panel__tags {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.provider-panel__actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+</style>
