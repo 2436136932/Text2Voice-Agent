@@ -120,7 +120,11 @@ echo.
 echo   To stop: run stop.bat
 echo ============================================
 echo.
-echo This window will close in 5 seconds...
-timeout /t 5 /nobreak >nul
+
+REM ---- open browser ----
+start "" "http://localhost:5173"
+
+echo Opening browser... This window will close in 3 seconds...
+timeout /t 3 /nobreak >nul
 endlocal
 exit /b 0
