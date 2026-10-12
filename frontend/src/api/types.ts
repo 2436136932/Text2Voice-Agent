@@ -104,6 +104,29 @@ export interface ValidateProviderResponse {
 }
 
 /* ------------------------------------------------------------------ */
+/* Fetch models from custom endpoint                                    */
+/* ------------------------------------------------------------------ */
+
+export interface FetchModelsRequest {
+  base_url: string
+  api_key: string
+  kind: 'llm' | 'tts'
+}
+
+export interface FetchedModel {
+  id: string
+  name: string
+  supports_tts: boolean
+  owned_by: string
+}
+
+export interface FetchModelsResponse {
+  models: FetchedModel[]
+  total: number
+  base_url: string
+}
+
+/* ------------------------------------------------------------------ */
 /* Generation                                                          */
 /* ------------------------------------------------------------------ */
 

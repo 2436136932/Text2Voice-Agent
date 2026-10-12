@@ -21,6 +21,7 @@ from typing import Iterable
 from app.adapters.base import LLMAdapter, TTSAdapter
 from app.adapters.llm import (
     AnthropicAdapter,
+    CustomLLMAdapter,
     DeepSeekAdapter,
     GeminiAdapter,
     MoonshotAdapter,
@@ -31,6 +32,7 @@ from app.adapters.llm import (
 )
 from app.adapters.tts import (
     AzureSpeechAdapter,
+    CustomTTSAdapter,
     EdgeTTSAdapter,
     ElevenLabsAdapter,
     MiniMaxTTSAdapter,
@@ -54,6 +56,7 @@ _LLM_ADAPTERS: tuple[LLMAdapter, ...] = (
     ZhipuAdapter(),
     MoonshotAdapter(),
     OllamaAdapter(),
+    CustomLLMAdapter(),
     MockLLMAdapter(),
 )
 
@@ -64,6 +67,7 @@ _TTS_ADAPTERS: tuple[TTSAdapter, ...] = (
     VolcengineTTSAdapter(),
     MiniMaxTTSAdapter(),
     EdgeTTSAdapter(),
+    CustomTTSAdapter(),
     MockTTSAdapter(),
 )
 

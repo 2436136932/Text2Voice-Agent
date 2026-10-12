@@ -1,6 +1,7 @@
 """LLM (chat completion) adapters, one module per vendor."""
 
 from app.adapters.llm.anthropic import AnthropicAdapter
+from app.adapters.llm.custom import CustomLLMAdapter
 from app.adapters.llm.deepseek import DeepSeekAdapter
 from app.adapters.llm.gemini import GeminiAdapter
 from app.adapters.llm.moonshot import MoonshotAdapter
@@ -11,6 +12,7 @@ from app.adapters.llm.zhipu import ZhipuAdapter
 
 __all__ = [
     "AnthropicAdapter",
+    "CustomLLMAdapter",
     "DeepSeekAdapter",
     "GeminiAdapter",
     "MoonshotAdapter",

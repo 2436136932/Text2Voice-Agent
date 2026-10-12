@@ -7,6 +7,8 @@ import { del, get, http, post, put } from './http'
 import type {
   DeleteHistoryBulkRequest,
   DeleteHistoryBulkResponse,
+  FetchModelsRequest,
+  FetchModelsResponse,
   GenerateRequest,
   GenerateResponse,
   HealthResponse,
@@ -49,6 +51,11 @@ export function fetchProviders(): Promise<ProvidersResponse> {
 /** `POST /providers/validate` — verify credentials / connectivity. */
 export function validateProvider(payload: ValidateProviderRequest): Promise<ValidateProviderResponse> {
   return post<ValidateProviderResponse>('/providers/validate', payload)
+}
+
+/** `POST /providers/models` — fetch model list from a custom OpenAI-compatible endpoint. */
+export function fetchModels(payload: FetchModelsRequest): Promise<FetchModelsResponse> {
+  return post<FetchModelsResponse>('/providers/models', payload)
 }
 
 /* ------------------------------------------------------------------ */

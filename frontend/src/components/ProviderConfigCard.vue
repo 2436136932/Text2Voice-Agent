@@ -8,11 +8,11 @@
  * It is never logged and never written to `/settings`.
  */
 import { computed, ref } from 'vue'
-import { ChatDotRound, Connection, Key, Link, Microphone, QuestionFilled } from '@element-plus/icons-vue'
+import { ChatDotRound, Connection, Download, Key, Link, Microphone, QuestionFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { validateProvider } from '@/api'
+import { fetchModels, validateProvider } from '@/api'
 import { ApiError } from '@/api/http'
-import type { ProviderKind, ValidateProviderRequest } from '@/api/types'
+import type { FetchedModel, ProviderKind, ValidateProviderRequest } from '@/api/types'
 import { useConfigStore } from '@/stores/config'
 import { useSettingsStore } from '@/stores/settings'
 import { genderLabel } from '@/utils/format'
@@ -27,6 +27,8 @@ const settingsStore = useSettingsStore()
 
 const validating = ref(false)
 const lastLatency = ref<number | null>(null)
+const fetchingModels = ref(false)
+const fetchedModels = ref<FetchedModel[]>([])
 
 const isLLM = computed<boolean>(() => props.kind === 'llm')
 
@@ -169,6 +171,48 @@ async function handleValidate(): Promise<void> {
 
 function handleProviderChange(): void {
   lastLatency.value = null
+  fetchedModels.value = []
+}
+
+/** Whether the 获取模型 button can run. */
+const canFetchModels = computed<boolean>(() => {
+  if (providerId.value !== 'custom') return false
+  if (apiKey.value.trim().length === 0) return false
+  if (baseUrl.value.trim().length === 0) return false
+  return true
+})
+
+/** Fetch model list from the custom endpoint via POST /providers/models. */
+async function handleFetchModels(): Promise<void> {
+  if (!canFetchModels.value) {
+    ElMessage.warning('请先填写 Base URL 和 API Key')
+    return
+  }
+
+  fetchingModels.value = true
+  try {
+    const result = await fetchModels({
+      base_url: baseUrl.value.trim(),
+      api_key: apiKey.value,
+      kind: isLLM.value ? 'llm' : 'tts',
+    })
+    fetchedModels.value = result.models
+    if (result.models.length === 0) {
+      ElMessage.warning('端点返回了空模型列表')
+    } else {
+      const ttsCount = result.models.filter((m) => m.supports_tts).length
+      const ttsInfo = isLLM.value ? '' : `，其中 ${ttsCount} 个支持语音合成`
+      ElMessage.success(`获取到 ${result.models.length} 个模型${ttsInfo}`)
+    }
+  } catch (error) {
+    if (error instanceof ApiError) {
+      ElMessage.error(`${error.message}${error.code ? ` [${error.code}]` : ''}`)
+    } else {
+      ElMessage.error('获取模型失败，请检查 Base URL 和 API Key')
+    }
+  } finally {
+    fetchingModels.value = false
+  }
 }
 
 /** Toggle the inline hint about where the key is stored. */
@@ -254,46 +298,91 @@ const keyHint = computed<string>(() =>
       </el-form-item>
 
       <el-form-item v-if="isLLM" label="模型">
-        <el-select
-          v-model="model"
-          class="provider-card__control"
-          placeholder="请选择或输入模型名称"
-          filterable
-          allow-create
-          default-first-option
-          :reserve-keyword="false"
-        >
-          <el-option
-            v-for="item in modelOptions"
-            :key="item.id"
-            :label="item.name"
-            :value="item.id"
-          />
-        </el-select>
+        <div class="provider-card__model-row">
+          <el-select
+            v-model="model"
+            class="provider-card__control provider-card__model-select"
+            placeholder="请选择或输入模型名称"
+            filterable
+            allow-create
+            default-first-option
+            :reserve-keyword="false"
+          >
+            <el-option
+              v-for="item in (fetchedModels.length > 0 ? fetchedModels : modelOptions)"
+              :key="item.id"
+              :label="item.name"
+              :value="item.id"
+            />
+          </el-select>
+          <el-button
+            v-if="providerId === 'custom'"
+            :icon="Download"
+            :loading="fetchingModels"
+            :disabled="!canFetchModels"
+            @click="handleFetchModels"
+          >
+            获取模型
+          </el-button>
+        </div>
       </el-form-item>
 
-      <el-form-item v-else label="发音人">
-        <el-select
-          v-model="voice"
-          class="provider-card__control"
-          placeholder="请选择发音人"
-          filterable
-        >
-          <el-option
-            v-for="item in voiceOptions"
-            :key="item.id"
-            :label="item.name"
-            :value="item.id"
+      <el-form-item v-else label="发音人 / 模型">
+        <div class="provider-card__model-row">
+          <el-select
+            v-model="voice"
+            class="provider-card__control provider-card__model-select"
+            placeholder="请选择发音人"
+            filterable
+            allow-create
           >
-            <span class="provider-card__option">
-              <span>{{ item.name }}</span>
-              <span class="provider-card__option-tags">
-                <el-tag size="small" effect="plain" type="info">{{ genderLabel(item.gender) }}</el-tag>
-                <el-tag size="small" effect="plain" type="info">{{ item.language }}</el-tag>
+            <el-option
+              v-for="item in (fetchedModels.length > 0 ? fetchedModels : voiceOptions)"
+              :key="item.id"
+              :label="item.name"
+              :value="item.id"
+            >
+              <span class="provider-card__option">
+                <span>{{ item.name }}</span>
+                <span class="provider-card__option-tags">
+                  <el-tag
+                    v-if="'supports_tts' in item && item.supports_tts"
+                    size="small"
+                    type="success"
+                    effect="dark"
+                  >
+                    TTS
+                  </el-tag>
+                  <el-tag
+                    v-if="'gender' in item"
+                    size="small"
+                    effect="plain"
+                    type="info"
+                  >
+                    {{ genderLabel(item.gender) }}
+                  </el-tag>
+                  <el-tag
+                    v-if="'language' in item"
+                    size="small"
+                    effect="plain"
+                    type="info"
+                  >
+                    {{ item.language }}
+                  </el-tag>
+                </span>
               </span>
-            </span>
-          </el-option>
-        </el-select>
+            </el-option>
+          </el-select>
+          <el-button
+            v-if="providerId === 'custom'"
+            :icon="Download"
+            :loading="fetchingModels"
+            :disabled="!canFetchModels"
+            @click="handleFetchModels"
+          >
+            获取模型
+          </el-button>
+        </div>
       </el-form-item>
 
       <el-collapse v-model="advancedOpen" class="provider-card__advanced">
@@ -360,6 +449,17 @@ const keyHint = computed<string>(() =>
 <style scoped>
 .provider-card {
   height: 100%;
+}
+
+.provider-card__model-row {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  align-items: flex-start;
+}
+
+.provider-card__model-select {
+  flex: 1;
 }
 
 .provider-card__header {

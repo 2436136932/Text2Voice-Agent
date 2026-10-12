@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, status
+from pydantic import BaseModel, Field, SecretStr
 
 from app.api.deps import RateLimitDefault, RateLimitGenerate
 from app.schemas.generation import (
@@ -13,6 +14,45 @@ from app.schemas.generation import (
 from app.services.providers import provider_service
 
 router = APIRouter(prefix="/providers", tags=["服务商 Providers"])
+
+
+# ---------------------------------------------------------------------------
+# Fetch models from a custom OpenAI-compatible endpoint
+# ---------------------------------------------------------------------------
+class FetchModelsRequest(BaseModel):
+    """Ask the backend to call ``GET {base_url}/models`` and return the list."""
+
+    base_url: str = Field(min_length=1, max_length=512)
+    api_key: SecretStr | None = None
+    #: ``"llm"`` fetches chat models; ``"tts"`` fetches audio-speech models.
+    kind: str = Field(default="llm", pattern="^(llm|tts)$")
+
+    model_config = {"extra": "forbid", "str_strip_whitespace": True}
+
+
+class ModelItem(BaseModel):
+    id: str
+    name: str
+    supports_tts: bool = False
+    owned_by: str = ""
+
+
+class FetchModelsResponse(BaseModel):
+    models: list[ModelItem]
+    total: int
+    base_url: str
+
+
+# Heuristic: model id patterns that indicate TTS / audio capability.
+_TTS_HINTS = (
+    "tts", "speech", "audio", "voice", "sound",
+    "speech-01", "bark", "xtts", "f5-tts",
+)
+
+
+def _looks_like_tts(model_id: str) -> bool:
+    mid = model_id.lower()
+    return any(hint in mid for hint in _TTS_HINTS)
 
 
 @router.get(
@@ -59,3 +99,102 @@ async def validate_provider(
         kind=result.kind,
         detail=result.detail,
     )
+
+
+@router.post(
+    "/models",
+    response_model=FetchModelsResponse,
+    summary="从自定义 OpenAI 兼容端点拉取模型列表",
+    description=(
+        "用提交的 base_url + api_key 调用 `GET {base_url}/models`，"
+        "返回模型列表。当 kind=tts 时，会在支持语音合成的模型上标记 "
+        "`supports_tts=true`（按模型名启发式判断：含 tts/speech/audio/voice 等）。\n\n"
+        "密钥仅用于本次请求，不落库、不记录。"
+    ),
+    responses={
+        200: {"description": "模型列表"},
+        400: {"description": "base_url 不合法或缺少密钥"},
+        502: {"description": "上游端点不可达或返回异常"},
+    },
+)
+async def fetch_models(
+    payload: FetchModelsRequest,
+    _: RateLimitGenerate,
+) -> FetchModelsResponse:
+    import time
+
+    import httpx
+
+    from app.adapters.base import get_http_client, map_upstream_error
+    from app.core.errors import AppError, ErrorCode
+    from app.core.logging import get_logger
+
+    logger = get_logger(__name__)
+
+    base_url = payload.base_url.rstrip("/")
+    api_key = payload.api_key.get_secret_value() if payload.api_key else ""
+
+    if not api_key:
+        raise AppError(
+            ErrorCode.MISSING_CREDENTIAL,
+            "请填写 API 密钥后再获取模型。",
+            detail={"kind": payload.kind},
+        )
+
+    url = f"{base_url}/models"
+    headers = {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
+
+    logger.info("fetching models from %s kind=%s", url, payload.kind)
+    started = time.perf_counter()
+    client = get_http_client()
+    try:
+        response = await client.get(url, headers=headers, timeout=20.0)
+    except Exception as exc:
+        raise map_upstream_error(
+            kind="llm", provider="custom", exception=exc, endpoint=url
+        ) from exc
+
+    if response.status_code >= 400:
+        try:
+            body = response.json()
+        except Exception:
+            body = response.text
+        raise map_upstream_error(
+            kind="llm", provider="custom", status_code=response.status_code,
+            body=body, endpoint=url,
+        )
+
+    try:
+        data = response.json()
+    except Exception as exc:
+        raise AppError(
+            ErrorCode.LLM_UPSTREAM_ERROR,
+            f"端点返回了非 JSON 响应，无法解析模型列表。",
+            detail={"base_url": base_url},
+            retryable=False,
+        ) from exc
+
+    # OpenAI format: {"data": [{"id": "gpt-4o", "owned_by": "openai"}, ...]}
+    raw_models = data.get("data", []) if isinstance(data, dict) else []
+    if not raw_models and isinstance(data, list):
+        raw_models = data  # some endpoints return a bare list
+
+    models: list[ModelItem] = []
+    for item in raw_models:
+        if not isinstance(item, dict):
+            continue
+        model_id = str(item.get("id", "")).strip()
+        if not model_id:
+            continue
+        supports_tts = _looks_like_tts(model_id) if payload.kind == "tts" else False
+        models.append(ModelItem(
+            id=model_id,
+            name=model_id,
+            supports_tts=supports_tts,
+            owned_by=str(item.get("owned_by", "")),
+        ))
+
+    latency = int((time.perf_counter() - started) * 1000)
+    logger.info("fetched %d models from %s in %dms", len(models), base_url, latency)
+
+    return FetchModelsResponse(models=models, total=len(models), base_url=base_url)
