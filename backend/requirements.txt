@@ -1,0 +1,22 @@
+# ---------------------------------------------------------------------------
+# Text2Voice Agent - backend runtime dependencies
+# Python >= 3.10 (3.13 tested)
+# ---------------------------------------------------------------------------
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.0
+httpx==0.28.1
+SQLAlchemy==2.0.36
+aiosqlite==0.20.0
+greenlet==3.1.1
+python-multipart==0.0.20
+python-dotenv==1.0.1
+orjson==3.10.13
+
+# ---------------------------------------------------------------------------
+# Optional extras
+# ---------------------------------------------------------------------------
+# Enables the "Edge 免费 TTS" provider (no API key required). The provider is
+# automatically hidden from GET /providers when this package is absent.
+websockets==14.1

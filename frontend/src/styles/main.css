@@ -1,0 +1,297 @@
+/* ==========================================================================
+   Text2Voice Agent — global stylesheet
+   Palette lives in CSS custom properties; no utility framework is used.
+   ========================================================================== */
+
+:root {
+  /* Brand */
+  --t2v-color-primary: #4f46e5;
+  --t2v-color-primary-hover: #6366f1;
+  --t2v-color-primary-soft: #eef2ff;
+
+  /* Semantic */
+  --t2v-color-success: #10b981;
+  --t2v-color-success-soft: #ecfdf5;
+  --t2v-color-warning: #f59e0b;
+  --t2v-color-warning-soft: #fffbeb;
+  --t2v-color-danger: #ef4444;
+  --t2v-color-danger-soft: #fef2f2;
+  --t2v-color-info: #64748b;
+  --t2v-color-info-soft: #f1f5f9;
+
+  /* Surfaces */
+  --t2v-bg-page: #f5f7fb;
+  --t2v-bg-surface: #ffffff;
+  --t2v-bg-muted: #f8fafc;
+  --t2v-bg-sidebar: #1e293b;
+  --t2v-bg-sidebar-active: #312e81;
+  --t2v-bg-sidebar-hover: #293548;
+
+  /* Text */
+  --t2v-text-primary: #0f172a;
+  --t2v-text-secondary: #475569;
+  --t2v-text-muted: #94a3b8;
+  --t2v-text-inverse: #f8fafc;
+
+  /* Borders */
+  --t2v-border-color: #e2e8f0;
+  --t2v-border-color-strong: #cbd5e1;
+
+  /* Layout */
+  --t2v-sidebar-width: 220px;
+  --t2v-header-height: 60px;
+  --t2v-content-padding: 20px;
+
+  /* Shape & motion */
+  --t2v-radius-sm: 6px;
+  --t2v-radius-md: 10px;
+  --t2v-radius-lg: 14px;
+  --t2v-shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06);
+  --t2v-shadow-md: 0 4px 14px rgba(15, 23, 42, 0.08);
+  --t2v-transition: 0.2s ease;
+
+  /* Element Plus bridge */
+  --el-color-primary: var(--t2v-color-primary);
+  --el-color-success: var(--t2v-color-success);
+  --el-color-warning: var(--t2v-color-warning);
+  --el-color-danger: var(--t2v-color-danger);
+  --el-border-radius-base: var(--t2v-radius-sm);
+  --el-font-family: inherit;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: var(--t2v-bg-page);
+  color: var(--t2v-text-primary);
+  font-family: 'Inter', 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', system-ui,
+    -apple-system, sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  margin: 0;
+  font-weight: 600;
+  color: var(--t2v-text-primary);
+}
+
+p {
+  margin: 0;
+}
+
+a {
+  color: var(--t2v-color-primary);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--t2v-color-primary-hover);
+}
+
+code,
+kbd,
+pre {
+  font-family: 'JetBrains Mono', 'Cascadia Code', Consolas, 'Courier New', monospace;
+}
+
+/* --------------------------------------------------------------------------
+   Scrollbars
+   -------------------------------------------------------------------------- */
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--t2v-border-color-strong);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--t2v-text-muted);
+}
+
+/* --------------------------------------------------------------------------
+   Layout primitives
+   -------------------------------------------------------------------------- */
+
+.t2v-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: var(--t2v-content-padding);
+  max-width: 1440px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.t2v-page__title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.t2v-page__title h2 {
+  font-size: 18px;
+}
+
+.t2v-page__subtitle {
+  color: var(--t2v-text-secondary);
+  font-size: 13px;
+}
+
+.t2v-grid {
+  display: grid;
+  gap: 16px;
+}
+
+.t2v-grid--2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.t2v-grid--3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.t2v-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.t2v-row--between {
+  justify-content: space-between;
+}
+
+.t2v-spacer {
+  flex: 1 1 auto;
+}
+
+.t2v-muted {
+  color: var(--t2v-text-secondary);
+}
+
+.t2v-mono {
+  font-family: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+}
+
+.t2v-truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.t2v-selectable {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.t2v-scroll-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.75;
+  color: var(--t2v-text-primary);
+}
+
+.t2v-error-detail {
+  margin-top: 10px;
+}
+
+.t2v-error-detail__body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--t2v-text-secondary);
+}
+
+/* --------------------------------------------------------------------------
+   Element Plus tweaks
+   -------------------------------------------------------------------------- */
+
+.el-card {
+  border-radius: var(--t2v-radius-md);
+  border-color: var(--t2v-border-color);
+  box-shadow: var(--t2v-shadow-sm) !important;
+}
+
+.el-card__header {
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--t2v-border-color);
+  font-weight: 600;
+}
+
+.el-card__body {
+  padding: 18px;
+}
+
+.el-form-item__label {
+  font-weight: 500;
+  color: var(--t2v-text-secondary);
+}
+
+.el-descriptions__label {
+  color: var(--t2v-text-secondary);
+}
+
+.el-table th.el-table__cell {
+  background-color: var(--t2v-bg-muted);
+  color: var(--t2v-text-secondary);
+  font-weight: 600;
+}
+
+.el-drawer__header {
+  margin-bottom: 0;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--t2v-border-color);
+  font-weight: 600;
+  color: var(--t2v-text-primary);
+}
+
+/* --------------------------------------------------------------------------
+   Responsive: comfortable down to 1024px
+   -------------------------------------------------------------------------- */
+
+@media (max-width: 1280px) {
+  .t2v-grid--3 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1024px) {
+  :root {
+    --t2v-sidebar-width: 180px;
+    --t2v-content-padding: 14px;
+  }
+
+  .t2v-grid--2,
+  .t2v-grid--3 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
