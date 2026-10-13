@@ -49,7 +49,7 @@ function emptyForm(): SettingsForm {
     default_speed: 1.0,
     default_system_prompt: '你是一个乐于助人的中文助手，回答简洁、口语化，适合朗读。',
     auto_save_history: true,
-    auto_save_credentials: false,
+    auto_save_credentials: true,
     request_timeout_seconds: 120,
   }
 }
@@ -381,20 +381,23 @@ function handleTTSProviderChange(value: string): void {
           <el-switch v-model="form.auto_save_history" />
         </el-form-item>
 
-        <el-form-item label="自动保存配置（保存 API Key 到本机浏览器）">
+        <el-form-item label="自动保存配置（记住 API Key 与服务商选择）">
           <el-switch
             v-model="form.auto_save_credentials"
             @change="(value: boolean) => handleAutoSaveChange(value)"
           />
+          <div class="settings-view__hint">
+            开启后，Key、服务商、模型、音色变更时会自动保存到本机浏览器，下次打开无需重填。
+          </div>
         </el-form-item>
 
         <el-alert
           v-if="form.auto_save_credentials"
-          type="warning"
+          type="info"
           show-icon
           :closable="false"
-          title="开启后 API Key 会以明文写入本机 localStorage"
-          description="仅本机可读，但仍建议在公用电脑上关闭此选项。后端始终不会保存任何密钥。"
+          title="API Key 以明文保存在本机 localStorage"
+          description="仅本机浏览器可读，后端始终不会接收或保存密钥。若使用公用电脑，请关闭此开关。"
         />
       </el-form>
     </el-card>

@@ -16,13 +16,20 @@ const configStore = useConfigStore()
 const settingsStore = useSettingsStore()
 
 onMounted(async () => {
-  // Server settings first: they seed the generation defaults and the timeout.
-  const settings = await settingsStore.load()
-  if (settings) configStore.applyDefaults(settings)
-
-  // Restore opt-in credentials only after the settings store has loaded, so we
-  // never resurrect keys the user has not explicitly agreed to keep.
+  // Restore the saved configuration FIRST, from localStorage alone. Doing this
+  // before the network round-trips means the user's keys and selections come
+  // back even if the backend is slow or temporarily unreachable — and it is
+  // exactly what `autoSaveCredentials` was meant to provide.
   if (settingsStore.autoSaveCredentials) configStore.restoreCredentials()
+
+  // Server settings: they seed the generation defaults and the timeout.
+  const settings = await settingsStore.load()
+  if (settings) {
+    configStore.applyDefaults(settings)
+    // The server value is authoritative once known; re-restore if the user has
+    // saving enabled but localStorage had not told us yet.
+    if (settingsStore.autoSaveCredentials) configStore.restoreCredentials()
+  }
 
   const providers = await configStore.loadProviders()
   if (!providers) {

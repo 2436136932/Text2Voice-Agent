@@ -40,12 +40,20 @@ export const MAX_TEXT_LENGTH = 5000
  */
 export type GenerationMode = 'tts' | 'clone' | 'text2audio'
 
-/** Shape of the opt-in localStorage credential cache. */
+/** Shape of the localStorage configuration cache. */
 interface CachedCredentials {
   llmApiKey: string
   ttsApiKey: string
   llmBaseUrl: string
   ttsBaseUrl: string
+  /* Non-secret selections, so the whole setup survives a reload. */
+  llmProviderId?: string
+  llmModel?: string
+  ttsProviderId?: string
+  ttsVoice?: string
+  ttsModel?: string
+  ttsSpeechPath?: string
+  savedAt?: string
 }
 
 export interface ConfigState {
@@ -414,15 +422,31 @@ export const useConfigStore = defineStore('config', {
       }
     },
 
-    /* ---------------- credential cache (opt-in) ---------------- */
+    /* ---------------- configuration cache ---------------- */
 
-    /** Write keys to localStorage — only call when the user opted in. */
+    /**
+     * Snapshot the current provider configuration into localStorage.
+     *
+     * Stores the API keys **and** the non-secret selections, so reopening the
+     * app restores the whole setup rather than just the credentials. Called
+     * automatically whenever a credential field changes (see the subscribers in
+     * `main.ts`), which is what makes "fill it once" actually work — previously
+     * this only ran when the user toggled the switch or pressed 保存设置, so a
+     * key typed on the generate page was silently lost on reload.
+     */
     persistCredentials(): void {
       const payload: CachedCredentials = {
         llmApiKey: this.llmApiKey,
         ttsApiKey: this.ttsApiKey,
         llmBaseUrl: this.llmBaseUrl,
         ttsBaseUrl: this.ttsBaseUrl,
+        llmProviderId: this.llmProviderId,
+        llmModel: this.llmModel,
+        ttsProviderId: this.ttsProviderId,
+        ttsVoice: this.ttsVoice,
+        ttsModel: this.ttsModel,
+        ttsSpeechPath: this.ttsSpeechPath,
+        savedAt: new Date().toISOString(),
       }
       try {
         localStorage.setItem(CREDENTIALS_STORAGE_KEY, JSON.stringify(payload))
@@ -431,7 +455,13 @@ export const useConfigStore = defineStore('config', {
       }
     },
 
-    /** Restore keys from localStorage when the user opted in. */
+    /**
+     * Restore keys and selections from localStorage.
+     *
+     * Selections are always restored (they are not sensitive); credentials are
+     * restored too, because the cache only exists when the user enabled saving
+     * — see `App.vue`, which gates this call on `autoSaveCredentials`.
+     */
     restoreCredentials(): void {
       try {
         const raw = localStorage.getItem(CREDENTIALS_STORAGE_KEY)
@@ -441,8 +471,30 @@ export const useConfigStore = defineStore('config', {
         if (typeof parsed.ttsApiKey === 'string') this.ttsApiKey = parsed.ttsApiKey
         if (typeof parsed.llmBaseUrl === 'string') this.llmBaseUrl = parsed.llmBaseUrl
         if (typeof parsed.ttsBaseUrl === 'string') this.ttsBaseUrl = parsed.ttsBaseUrl
+        if (typeof parsed.llmProviderId === 'string' && parsed.llmProviderId) {
+          this.llmProviderId = parsed.llmProviderId
+        }
+        if (typeof parsed.llmModel === 'string' && parsed.llmModel) this.llmModel = parsed.llmModel
+        if (typeof parsed.ttsProviderId === 'string' && parsed.ttsProviderId) {
+          this.ttsProviderId = parsed.ttsProviderId
+        }
+        if (typeof parsed.ttsVoice === 'string' && parsed.ttsVoice) this.ttsVoice = parsed.ttsVoice
+        if (typeof parsed.ttsModel === 'string') this.ttsModel = parsed.ttsModel
+        if (typeof parsed.ttsSpeechPath === 'string') this.ttsSpeechPath = parsed.ttsSpeechPath
       } catch {
         /* malformed payload — ignore */
+      }
+    },
+
+    /** When the cache was last written (for the settings page). */
+    cachedCredentialsSavedAt(): string | null {
+      try {
+        const raw = localStorage.getItem(CREDENTIALS_STORAGE_KEY)
+        if (!raw) return null
+        const parsed = JSON.parse(raw) as Partial<CachedCredentials>
+        return typeof parsed.savedAt === 'string' ? parsed.savedAt : null
+      } catch {
+        return null
       }
     },
 

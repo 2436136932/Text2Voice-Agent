@@ -261,7 +261,9 @@ class TestGenerationServiceDegradation:
 class TestSettingsPersistence:
     async def test_defaults_are_seeded(self, session):
         values = await SettingModel.load(session)
-        assert values["auto_save_credentials"] is False
+        # Credentials are remembered by default so a configured key survives a
+        # page reload; the user can still switch this off in the settings page.
+        assert values["auto_save_credentials"] is True
         assert values["request_timeout_seconds"] == 120
 
     async def test_unknown_keys_are_merged_not_lost(self, session):

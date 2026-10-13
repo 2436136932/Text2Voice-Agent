@@ -196,7 +196,11 @@ class SettingModel(Base):
         "default_speed": 1.0,
         "default_system_prompt": "你是一个乐于助人的中文助手，回答简洁、口语化，适合朗读。",
         "auto_save_history": True,
-        "auto_save_credentials": False,
+        # Credentials live ONLY in the browser (localStorage) — the server never
+        # receives or stores them. Defaulting to true matches the user's
+        # expectation that a key typed once is remembered; the settings page
+        # still exposes the switch, with a warning, for shared machines.
+        "auto_save_credentials": True,
         "request_timeout_seconds": 120,
         "temperature": 0.7,
         "max_tokens": 1024,

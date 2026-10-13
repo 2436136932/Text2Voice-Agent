@@ -41,7 +41,10 @@ export interface PendingDefaults {
 export const useSettingsStore = defineStore('settings', {
   state: (): SettingsState => ({
     server: null,
-    autoSaveCredentials: false,
+    // Mirrors the server default: remember what the user typed so a reload does
+    // not lose the API keys. The settings page exposes the switch (with a
+    // warning) for shared machines.
+    autoSaveCredentials: true,
     loading: false,
     saving: false,
     loaded: false,

@@ -558,8 +558,22 @@ class TestSettingsRoutes:
         payload = response.json()
         assert payload["default_llm_provider"]
         assert payload["default_tts_provider"]
-        assert payload["auto_save_credentials"] is False
+        # Credentials are remembered by default so a key typed once survives a
+        # reload; the switch still allows opting out on a shared machine.
+        assert payload["auto_save_credentials"] is True
         assert payload["request_timeout_seconds"] == 120
+
+    async def test_credentials_can_be_switched_off(self, client):
+        """The opt-out must still work for shared machines.
+
+        Even when saving is enabled, the server never receives a key — this
+        flag only drives the browser-side cache.
+        """
+        response = await client.put("/api/v1/settings", json={"auto_save_credentials": False})
+        assert response.status_code == 200
+        assert response.json()["auto_save_credentials"] is False
+        reloaded = (await client.get("/api/v1/settings")).json()
+        assert reloaded["auto_save_credentials"] is False
 
     async def test_partial_update(self, client):
         response = await client.put(

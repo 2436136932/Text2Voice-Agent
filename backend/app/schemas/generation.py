@@ -368,7 +368,7 @@ class SettingsSchema(BaseModel):
     default_speed: float = Field(default=1.0, ge=0.1, le=4.0)
     default_system_prompt: str = ""
     auto_save_history: bool = True
-    auto_save_credentials: bool = False
+    auto_save_credentials: bool = True
     request_timeout_seconds: int = Field(default=120, ge=5, le=600)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     max_tokens: int = Field(default=1024, ge=1, le=32768)
