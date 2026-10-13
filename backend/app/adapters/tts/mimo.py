@@ -172,6 +172,28 @@ class MiMoTTSAdapter(TTSAdapter):
     CLONE_MIN_MS = 3_000
     CLONE_MAX_MS = 10_000
     CLONE_FORMATS = ("mp3", "wav")
+    #: Documented upper bound for the encoded sample.
+    CLONE_MAX_BYTES = 10 * 1024 * 1024
+
+    @staticmethod
+    def _mime_for(filename: str) -> str:
+        extension = (Path(filename).suffix.lstrip(".") or "wav").lower()
+        return {
+            "wav": "audio/wav",
+            "mp3": "audio/mpeg",
+        }.get(extension, "audio/wav")
+
+    @classmethod
+    def encode_reference_voice(cls, audio: bytes, filename: str) -> str:
+        """Wrap a reference clip the way MiMo expects ``audio.voice``.
+
+        The vendor wants a **data URI** (``data:audio/wav;base64,<...>``), not
+        bare base64. Sending raw base64 made it fail to decode the sample: the
+        request still succeeded, but produced ~1 second of audio that ignored
+        the requested text, which is a very confusing failure to debug.
+        """
+        encoded = base64.b64encode(audio).decode("ascii")
+        return f"data:{cls._mime_for(filename)};base64,{encoded}"
 
     async def clone_voice(self, request: VoiceCloneRequest) -> VoiceCloneResult:
         """Register a reference clip for ``mimo-v2.5-tts-voiceclone``.
@@ -267,15 +289,27 @@ class MiMoTTSAdapter(TTSAdapter):
     def build_payload(self, request: TTSRequest, model: str, audio_format: str) -> dict:
         """Assemble the chat-completions body MiMo expects."""
         text = request.text
-        style = str(request.extra.get("style_prompt") or "").strip() or DEFAULT_STYLE_PROMPT
+
+        # The `user` message is a *style instruction*, and its default must
+        # depend on the model:
+        #   * voiceclone: leave it EMPTY (per MiMo's own example). A style
+        #     prompt here competes with the reference clip and the model may
+        #     answer the instruction instead of reading the target text.
+        #   * otherwise: a neutral "read this naturally" instruction, which is
+        #     what the vendor's non-streaming example uses.
+        default_style = "" if model == MODEL_VOICE_CLONE else DEFAULT_STYLE_PROMPT
+        style = request.extra.get("style_prompt")
+        style = default_style if style is None else str(style).strip()
 
         messages: list[dict[str, str]] = [{"role": "user", "content": style}]
 
         audio: dict[str, object] = {"format": audio_format}
 
         if model == MODEL_VOICE_CLONE:
-            # The cloned voice *is* the reference audio, sent as base64. The
-            # text then has to travel as the assistant message.
+            # The cloned voice *is* the reference audio. MiMo expects a **data
+            # URI**, not bare base64: `data:audio/wav;base64,<...>`. Sending the
+            # raw base64 made the vendor fail to decode the clip, which showed
+            # up as a ~1 second result that ignored the requested text.
             reference = request.extra.get("reference_audio_bytes")
             if not isinstance(reference, (bytes, bytearray)) or not reference:
                 raise AppError(
@@ -289,7 +323,9 @@ class MiMoTTSAdapter(TTSAdapter):
                         ),
                     },
                 )
-            audio["voice"] = base64.b64encode(bytes(reference)).decode("ascii")
+            audio["voice"] = self.encode_reference_voice(
+                bytes(reference), str(request.extra.get("reference_audio_filename") or "reference.wav")
+            )
         else:
             audio["voice"] = request.voice or self.default_voice
 

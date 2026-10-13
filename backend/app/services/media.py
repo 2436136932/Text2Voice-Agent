@@ -64,6 +64,11 @@ NATIVE_TRIM_FORMATS = frozenset({"wav"})
 #: Hard cap on a single trim window (10 minutes).
 MAX_TRIM_WINDOW_MS = 600_000
 
+#: Sample rate for extracted/trimmed reference clips.
+#: 24 kHz mono matches MiMo's native TTS output rate and its documented example
+#: clips; resampling down to 16 kHz made the vendor read a 6 s clip as ~1 s.
+CLONE_SAMPLE_RATE = 24_000
+
 
 def accepted_extensions() -> list[str]:
     return sorted(ACCEPTED_FORMATS)
@@ -537,12 +542,16 @@ def _trim_with_ffmpeg(source: Path, start_ms: int, end_ms: int) -> bytes:
                 status.path,
                 "-y",
                 "-loglevel", "error",
+                # -ss/-to before -i is fast and accurate enough for a container.
                 "-ss", f"{start_ms / 1000:.3f}",
                 "-to", f"{end_ms / 1000:.3f}",
                 "-i", str(source),
                 "-vn",
                 "-acodec", "pcm_s16le",
-                "-ar", "16000",
+                # 24 kHz mono, matching MiMo's native output rate and the
+                # reference clips its docs use. Resampling to 16 kHz produced
+                # clips the vendor mis-read as ~1 s long.
+                "-ar", str(CLONE_SAMPLE_RATE),
                 "-ac", "1",
                 str(output),
             ],
@@ -615,7 +624,9 @@ def trim_media(media_id: str, start_ms: int, end_ms: int) -> MediaRecord:
         kind="audio",
         content_type="audio/wav",
         duration_ms=duration_ms,
-        sample_rate=16000,
+        # Native WAV trims keep the source rate; ffmpeg output is resampled to
+        # CLONE_SAMPLE_RATE. Record whichever actually applies.
+        sample_rate=probed.get("sample_rate") if record.extension not in NATIVE_TRIM_FORMATS else None,
         channels=1,
         warnings=[],
         source_media_id=record.media_id,

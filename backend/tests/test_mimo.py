@@ -286,8 +286,78 @@ class TestMiMoVoiceClone:
             )
         )
         body = recorder.calls[0]["json"]
-        assert body["audio"]["voice"] == base64.b64encode(reference).decode("ascii")
+        # Must be a data URI, not bare base64 (see the dedicated regression test).
+        assert body["audio"]["voice"].startswith("data:audio/wav;base64,")
+        assert base64.b64decode(body["audio"]["voice"].split("base64,", 1)[1]) == reference
         assert body["messages"][-1] == {"role": "assistant", "content": "克隆朗读"}
+
+    async def test_reference_voice_is_a_data_uri(self, patch_client):
+        """MiMo wants ``data:audio/wav;base64,<...>``, not bare base64.
+
+        Regression: raw base64 made the vendor mis-decode the sample, producing
+        ~1 second of audio that ignored the requested text — a silent, very
+        confusing failure rather than an error.
+        """
+        recorder = _Recorder(lambda m, u: httpx.Response(200, json=_success_body(), request=httpx.Request(m, u)))
+        patch_client(recorder)
+
+        reference = b"RIFF" + b"\x00" * 64
+        await registry.tts("mimo").synthesize(
+            TTSRequest(
+                text="要被朗读的文本",
+                api_key="k-12345678",
+                model="mimo-v2.5-tts-voiceclone",
+                audio_format="wav",
+                extra={
+                    "reference_audio_bytes": reference,
+                    "reference_audio_filename": "sample.wav",
+                },
+            )
+        )
+        voice = recorder.calls[0]["json"]["audio"]["voice"]
+        assert voice.startswith("data:audio/wav;base64,"), voice[:40]
+        assert base64.b64decode(voice.split("base64,", 1)[1]) == reference
+
+    async def test_voiceclone_leaves_the_user_message_empty(self, patch_client):
+        """MiMo's own example sends an empty `user` message for voiceclone.
+
+        A style prompt in that slot competes with the reference clip and can
+        make the model answer the instruction instead of reading the text.
+        """
+        recorder = _Recorder(lambda m, u: httpx.Response(200, json=_success_body(), request=httpx.Request(m, u)))
+        patch_client(recorder)
+
+        await registry.tts("mimo").synthesize(
+            TTSRequest(
+                text="目标文本",
+                api_key="k-12345678",
+                model="mimo-v2.5-tts-voiceclone",
+                audio_format="wav",
+                extra={"reference_audio_bytes": b"RIFF" + b"\x00" * 32},
+            )
+        )
+        messages = recorder.calls[0]["json"]["messages"]
+        assert messages[0] == {"role": "user", "content": ""}
+        assert messages[-1] == {"role": "assistant", "content": "目标文本"}
+
+    async def test_preset_voice_keeps_a_style_instruction(self, patch_client):
+        """The empty-user-message rule is specific to voiceclone."""
+        recorder = _Recorder(lambda m, u: httpx.Response(200, json=_success_body(), request=httpx.Request(m, u)))
+        patch_client(recorder)
+
+        await registry.tts("mimo").synthesize(
+            TTSRequest(
+                text="你好",
+                api_key="k-12345678",
+                voice="冰糖",
+                model="mimo-v2.5-tts",
+                audio_format="wav",
+            )
+        )
+        body = recorder.calls[0]["json"]
+        assert body["messages"][0]["role"] == "user"
+        assert len(body["messages"][0]["content"]) > 0
+        assert body["audio"]["voice"] == "冰糖"
 
     async def test_clone_without_reference_is_rejected(self, patch_client):
         recorder = _Recorder(lambda m, u: httpx.Response(200, json=_success_body(), request=httpx.Request(m, u)))
