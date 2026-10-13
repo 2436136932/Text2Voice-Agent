@@ -145,6 +145,35 @@ async def metrics_endpoint() -> MetricsResponse:
 
 
 @router.get(
+    "/meta/debug-capture",
+    summary="读取/开关出站请求抓包",
+    description=(
+        "调试用：开启后记录每次调用服务商的**实际请求**（URL、脱敏后的请求头与"
+        "请求体）与响应，最多保留 30 条，供排查 404 / 参数不符等问题。\n\n"
+        "`?enabled=true` 开启（会清空历史），`?enabled=false` 关闭，"
+        "不传则仅读取当前记录。\n\n"
+        "**密钥经过统一脱敏管线，不会出现在抓包结果中**；该功能默认关闭。"
+    ),
+    tags=["元信息 Meta"],
+)
+async def debug_capture(
+    enabled: bool | None = None,
+    clear: bool = False,
+) -> dict:
+    from app.core import sniffer
+
+    if clear:
+        sniffer.clear()
+    if enabled is not None:
+        sniffer.set_enabled(enabled)
+    return {
+        "enabled": sniffer.is_enabled(),
+        "count": len(sniffer.snapshot()),
+        "records": sniffer.snapshot(),
+    }
+
+
+@router.get(
     "/meta/config",
     summary="非敏感运行时配置",
     description="暴露前端的可调参数（文本长度上限、超时、限流阈值等），不含任何密钥。",

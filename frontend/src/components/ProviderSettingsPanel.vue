@@ -22,9 +22,15 @@ import {
   Star,
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { fetchModels, probePaths, validateProvider } from '@/api'
+import { fetchDebugCapture, fetchModels, probePaths, validateProvider } from '@/api'
 import { ApiError } from '@/api/http'
-import type { FetchedModel, ProbePathItem, ProviderKind, ValidateProviderRequest } from '@/api/types'
+import type {
+  DebugCaptureRecord,
+  FetchedModel,
+  ProbePathItem,
+  ProviderKind,
+  ValidateProviderRequest,
+} from '@/api/types'
 import { useConfigStore } from '@/stores/config'
 import { useSettingsStore } from '@/stores/settings'
 import { genderLabel } from '@/utils/format'
@@ -46,6 +52,9 @@ const advancedOpen = ref<string[]>([])
 const probingPaths = ref(false)
 const probeResults = ref<ProbePathItem[]>([])
 const suggestedPath = ref<string | null>(null)
+const capturingDebug = ref(false)
+const debugRecords = ref<DebugCaptureRecord[]>([])
+const debugEnabled = ref(false)
 
 /* ------------------------------ bound fields ----------------------------- */
 
@@ -249,6 +258,76 @@ async function handleFetchModels(): Promise<void> {
   } finally {
     fetchingModels.value = false
   }
+}
+
+/** Enable/disable the backend request capture. */
+async function handleToggleCapture(enabled: boolean): Promise<void> {
+  capturingDebug.value = true
+  try {
+    const result = await fetchDebugCapture({ enabled })
+    debugEnabled.value = result.enabled
+    debugRecords.value = result.records
+    if (!enabled) ElMessage.info('已停止抓包')
+  } catch (error) {
+    reportError(error, '切换抓包失败')
+  } finally {
+    capturingDebug.value = false
+  }
+}
+
+/**
+ * Turn capture on, fire one validation probe, then show what was actually sent.
+ *
+ * This is the fastest way to diagnose "the endpoint 404s and I do not know
+ * why": it shows the real URL, headers and body the backend used.
+ */
+async function handleCaptureDebug(): Promise<void> {
+  capturingDebug.value = true
+  try {
+    await fetchDebugCapture({ enabled: true })
+    debugEnabled.value = true
+
+    // Trigger one real outbound call so there is something to inspect.
+    if (canValidate.value) {
+      await validateProvider({
+        kind: props.kind,
+        provider: providerId.value,
+        api_key: apiKey.value,
+        base_url: baseUrl.value.trim() || null,
+        model: isLLM.value ? model.value : configStore.ttsModel || null,
+        voice: isLLM.value ? null : voice.value,
+      }).catch(() => undefined)
+    }
+
+    const result = await fetchDebugCapture({})
+    debugRecords.value = result.records
+    if (result.records.length === 0) {
+      ElMessage.warning('没有捕捉到请求。请先填写完整配置（Base URL / Key / 模型）')
+    } else {
+      ElMessage.success(`已捕捉 ${result.records.length} 条请求`)
+    }
+  } catch (error) {
+    reportError(error, '抓包失败')
+  } finally {
+    capturingDebug.value = false
+  }
+}
+
+/** Render one captured call as copyable plain text. */
+function formatCapture(item: DebugCaptureRecord): string {
+  const lines: string[] = []
+  lines.push(`URL: ${item.method} ${item.url}`)
+  const headerEntries = Object.entries(item.headers ?? {})
+  if (headerEntries.length > 0) {
+    lines.push(`Headers: ${headerEntries.map(([k, v]) => `${k}: ${v}`).join(', ')}`)
+  }
+  if (item.request_body !== null && item.request_body !== undefined) {
+    lines.push(`Request: ${JSON.stringify(item.request_body)}`)
+  }
+  if (item.response_body) lines.push(`Response: ${item.response_body}`)
+  if (item.error) lines.push(`Error: ${item.error}`)
+  lines.push(`Elapsed: ${item.elapsed_ms}ms`)
+  return lines.join('\n')
 }
 
 async function handleProbePaths(): Promise<void> {
@@ -626,9 +705,31 @@ function setAsDefault(): void {
                 type="warning"
                 show-icon
                 :closable="false"
-                title="常见路径都没有响应"
-                description="请查阅服务商文档确认接口地址；也可能是 base_url 或密钥有误。"
-              />
+                title="没有探测到可用路径，请用「抓包」看后端实际发了什么"
+                description="服务商可能不是 OpenAI 兼容格式。开启抓包后点一次「测试连接」，即可看到完整的请求地址、请求头与请求体，便于对照官方文档。"
+              >
+                <template #default>
+                  <el-button size="small" :loading="capturingDebug" @click="handleCaptureDebug">
+                    抓取最近一次请求
+                  </el-button>
+                </template>
+              </el-alert>
+
+              <div v-if="debugRecords.length > 0" class="provider-panel__debug">
+                <div class="provider-panel__probe-title">
+                  抓包结果（{{ debugRecords.length }} 条，密钥已脱敏）
+                </div>
+                <div v-for="item in debugRecords" :key="item.seq" class="provider-panel__debug-item">
+                  <div class="provider-panel__debug-line">
+                    <el-tag size="small" :type="item.status && item.status < 400 ? 'success' : 'danger'">
+                      {{ item.status ?? item.error ?? '—' }}
+                    </el-tag>
+                    <span class="t2v-mono">{{ item.method }} {{ item.url }}</span>
+                  </div>
+                  <pre class="provider-panel__debug-body">{{ formatCapture(item) }}</pre>
+                </div>
+                <el-button size="small" @click="handleToggleCapture(false)">停止抓包</el-button>
+              </div>
             </div>
           </el-form-item>
 
@@ -793,6 +894,38 @@ function setAsDefault(): void {
 
 .provider-panel__probe-suggest {
   margin-top: 10px;
+}
+
+.provider-panel__debug {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--el-border-color-lighter);
+}
+
+.provider-panel__debug-item {
+  margin-bottom: 10px;
+}
+
+.provider-panel__debug-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  word-break: break-all;
+  margin-bottom: 4px;
+}
+
+.provider-panel__debug-body {
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--el-fill-color-light);
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 200px;
+  overflow: auto;
 }
 
 .provider-panel__tags {

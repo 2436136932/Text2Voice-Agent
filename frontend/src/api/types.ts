@@ -262,6 +262,31 @@ export interface ProbePathsResponse {
 }
 
 /* ------------------------------------------------------------------ */
+/* Debug capture (outbound request sniffer)                            */
+/* ------------------------------------------------------------------ */
+
+export interface DebugCaptureRecord {
+  seq: number
+  time: string
+  provider: string
+  kind: string
+  method: string
+  url: string
+  request_body: unknown
+  headers: Record<string, string>
+  status: number | null
+  response_body: string
+  error: string | null
+  elapsed_ms: number
+}
+
+export interface DebugCaptureResponse {
+  enabled: boolean
+  count: number
+  records: DebugCaptureRecord[]
+}
+
+/* ------------------------------------------------------------------ */
 /* Generation                                                          */
 /* ------------------------------------------------------------------ */
 

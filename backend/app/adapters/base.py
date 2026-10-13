@@ -20,11 +20,13 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+import time
 from typing import Any, Literal, Sequence
 
 import httpx
 
 from app.core.config import settings
+from app.core import sniffer
 from app.core.errors import AppError, ErrorCode
 from app.core.logging import get_logger, log_upstream_call
 
@@ -384,6 +386,11 @@ async def request_json(
     """
     client = get_http_client()
     log_upstream_call(logger, provider=provider, endpoint=url, payload=json_body or data or {})
+    probe = sniffer.record(
+        provider=provider, kind=kind, method=method, url=url,
+        headers=headers, request_body=json_body if json_body is not None else data,
+    )
+    started = time.perf_counter()
     try:
         response = await client.request(
             method,
@@ -395,6 +402,10 @@ async def request_json(
             timeout=timeout,
         )
     except Exception as exc:  # noqa: BLE001 - normalized below
+        sniffer.complete(
+            probe, error=f"{type(exc).__name__}: {exc}",
+            elapsed_ms=int((time.perf_counter() - started) * 1000),
+        )
         raise map_upstream_error(kind=kind, provider=provider, exception=exc, endpoint=url) from exc
 
     if response.status_code >= 400:
@@ -402,6 +413,10 @@ async def request_json(
             body: Any = response.json()
         except Exception:  # noqa: BLE001 - non-JSON error page
             body = response.text
+        sniffer.complete(
+            probe, status=response.status_code, response_body=body,
+            elapsed_ms=int((time.perf_counter() - started) * 1000),
+        )
         raise map_upstream_error(
             kind=kind,
             provider=provider,
@@ -411,9 +426,14 @@ async def request_json(
         )
 
     try:
-        return response.json(), response.status_code
+        parsed = response.json()
     except Exception:  # noqa: BLE001
-        return response.text, response.status_code
+        parsed = response.text
+    sniffer.complete(
+        probe, status=response.status_code, response_body=parsed,
+        elapsed_ms=int((time.perf_counter() - started) * 1000),
+    )
+    return parsed, response.status_code
 
 
 async def request_bytes(
@@ -434,6 +454,11 @@ async def request_bytes(
     """
     client = get_http_client()
     log_upstream_call(logger, provider=provider, endpoint=url, payload=json_body or data or {})
+    probe = sniffer.record(
+        provider=provider, kind=kind, method=method, url=url,
+        headers=headers, request_body=json_body if json_body is not None else data,
+    )
+    started = time.perf_counter()
     try:
         response = await client.request(
             method,
@@ -445,6 +470,10 @@ async def request_bytes(
             timeout=timeout,
         )
     except Exception as exc:  # noqa: BLE001
+        sniffer.complete(
+            probe, error=f"{type(exc).__name__}: {exc}",
+            elapsed_ms=int((time.perf_counter() - started) * 1000),
+        )
         raise map_upstream_error(kind=kind, provider=provider, exception=exc, endpoint=url) from exc
 
     if response.status_code >= 400:
@@ -452,17 +481,31 @@ async def request_bytes(
             body: Any = response.json()
         except Exception:  # noqa: BLE001
             body = response.text
+        sniffer.complete(
+            probe, status=response.status_code, response_body=body,
+            elapsed_ms=int((time.perf_counter() - started) * 1000),
+        )
         raise map_upstream_error(
             kind=kind, provider=provider, status_code=response.status_code, body=body, endpoint=url
         )
 
     if not response.content:
+        sniffer.complete(
+            probe, status=response.status_code, response_body="<empty body>",
+            elapsed_ms=int((time.perf_counter() - started) * 1000),
+        )
         raise AppError(
             ErrorCode(f"{kind.upper()}_UPSTREAM_ERROR"),
             f"{provider} 返回了空的音频数据。",
             detail={"provider": provider, "endpoint": url},
             retryable=True,
         )
+    sniffer.complete(
+        probe, status=response.status_code,
+        response_body=f"<binary {len(response.content)} bytes, "
+                      f"content-type={response.headers.get('content-type', '?')}>",
+        elapsed_ms=int((time.perf_counter() - started) * 1000),
+    )
     return response.content, response.headers.get("content-type", "application/octet-stream"), response.status_code
 
 

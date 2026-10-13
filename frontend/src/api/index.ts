@@ -8,6 +8,7 @@ import type {
   CapabilitiesResponse,
   CloneVoiceRequest,
   ClonedVoice,
+  DebugCaptureResponse,
   DeleteHistoryBulkRequest,
   DeleteHistoryBulkResponse,
   FetchModelsRequest,
@@ -70,6 +71,18 @@ export function fetchModels(payload: FetchModelsRequest): Promise<FetchModelsRes
 /** `POST /providers/probe-paths` — discover which TTS routes a custom endpoint exposes. */
 export function probePaths(payload: ProbePathsRequest): Promise<ProbePathsResponse> {
   return post<ProbePathsResponse>('/providers/probe-paths', payload)
+}
+
+/**
+ * `GET /meta/debug-capture` — read the outbound request capture.
+ *
+ * `enabled` toggles recording (clearing history when switched on); `clear`
+ * empties it. Credentials are redacted by the backend before capture.
+ */
+export function fetchDebugCapture(
+  params: { enabled?: boolean; clear?: boolean } = {},
+): Promise<DebugCaptureResponse> {
+  return get<DebugCaptureResponse>('/meta/debug-capture', params)
 }
 
 /* ------------------------------------------------------------------ */
