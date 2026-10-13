@@ -56,6 +56,15 @@ const dragActive = ref(false)
 const info = ref<MediaInfo | null>(props.media ?? null)
 const localError = ref<string | null>(null)
 
+/** The single hidden file input this component owns. */
+const fileInputRef = ref<HTMLInputElement | null>(null)
+
+/** Open the OS file picker. */
+function openFileDialog(): void {
+  if (uploading.value) return
+  fileInputRef.value?.click()
+}
+
 /** Original upload, kept so "重置裁剪" can restore it. */
 const original = ref<MediaInfo | null>(null)
 
@@ -365,14 +374,21 @@ async function handleFile(file: File): Promise<void> {
 function onFileInput(event: Event): void {
   const target = event.target as HTMLInputElement
   const file = target.files?.[0]
-  if (file) void handleFile(file)
+  // Reset first so re-selecting the same file fires `change` again.
   target.value = ''
+  if (!file) return
+  void handleFile(file)
 }
 
 function onDrop(event: DragEvent): void {
   dragActive.value = false
   const file = event.dataTransfer?.files?.[0]
-  if (file) void handleFile(file)
+  if (!file) {
+    // A drop that carries no file (e.g. dragging text) must not silently no-op.
+    ElMessage.warning('没有检测到文件，请拖入音频或视频文件')
+    return
+  }
+  void handleFile(file)
 }
 
 async function clear(): Promise<void> {
@@ -416,19 +432,30 @@ const isVideo = computed<boolean>(() => info.value?.kind === 'video')
 
 <template>
   <div class="media-picker">
-    <el-upload
+    <!--
+      A hand-rolled drop zone rather than <el-upload>.
+
+      el-upload renders its own hidden <input type="file">, so nesting a second
+      input inside it produced two competing inputs: the click could land on the
+      component's input (whose select handler is not ours), and with
+      `auto-upload=false` nothing forwarded the chosen file. Owning the input
+      makes the click path unambiguous.
+    -->
+    <div
       v-if="!info"
       class="media-picker__drop"
-      drag
-      :accept="accept"
-      :show-file-list="false"
-      :auto-upload="false"
-      :disabled="uploading"
-      @drop.prevent="onDrop"
+      :class="{ 'is-dragging': dragActive, 'is-busy': uploading }"
+      role="button"
+      tabindex="0"
+      @click="openFileDialog"
+      @keydown.enter.prevent="openFileDialog"
+      @keydown.space.prevent="openFileDialog"
       @dragover.prevent="dragActive = true"
+      @dragenter.prevent="dragActive = true"
       @dragleave.prevent="dragActive = false"
+      @drop.prevent="onDrop"
     >
-      <div class="media-picker__inner" :class="{ 'is-drag': dragActive }">
+      <div class="media-picker__inner">
         <el-icon class="media-picker__icon"><UploadFilled /></el-icon>
         <div class="media-picker__title">
           {{ uploading ? `上传中 ${uploadPercent}%` : '点击或拖拽上传音频 / 视频' }}
@@ -444,12 +471,13 @@ const isVideo = computed<boolean>(() => info.value?.kind === 'video')
         />
       </div>
       <input
+        ref="fileInputRef"
         class="media-picker__input"
         type="file"
         :accept="accept"
         @change="onFileInput"
       />
-    </el-upload>
+    </div>
 
     <div v-else class="media-picker__preview">
       <div class="media-picker__meta">
@@ -582,19 +610,33 @@ const isVideo = computed<boolean>(() => info.value?.kind === 'video')
 </template>
 
 <style scoped>
-.media-picker__drop :deep(.el-upload-dragger) {
-  padding: 0;
+.media-picker__drop {
+  position: relative;
+  border: 1px dashed var(--el-border-color);
   border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+  outline: none;
+}
+
+.media-picker__drop:hover,
+.media-picker__drop:focus-visible {
+  border-color: var(--t2v-color-primary, var(--el-color-primary));
+  background: var(--el-fill-color-lighter);
+}
+
+.media-picker__drop.is-dragging {
+  border-color: var(--t2v-color-primary, var(--el-color-primary));
+  background: var(--t2v-color-primary-light, #ecf5ff);
+}
+
+.media-picker__drop.is-busy {
+  cursor: progress;
 }
 
 .media-picker__inner {
   padding: 22px 16px;
   text-align: center;
-  transition: background-color 0.15s ease;
-}
-
-.media-picker__inner.is-drag {
-  background: var(--t2v-color-primary-light, #ecf5ff);
 }
 
 .media-picker__icon {
