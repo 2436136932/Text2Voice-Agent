@@ -72,9 +72,31 @@ if not exist "%FRONTEND%\node_modules" (
 echo.
 echo [*] Starting services (no console windows)...
 
-REM ---- kill anything on 8000 / 5173 first ----
-for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr ":8000 " ^| findstr "LISTENING"') do taskkill /PID %%a /F >nul 2>&1
-for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr ":5173 " ^| findstr "LISTENING"') do taskkill /PID %%a /F >nul 2>&1
+REM ---- free the ports first ----
+REM /T is essential: the services run behind `cmd /c` wrappers, so killing only
+REM the port owner can leave the real python/node alive. The survivor then
+REM competes for the same port and the browser sees ERR_CONNECTION_RESET.
+for %%P in (8000 5173) do (
+    for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr ":%%P " ^| findstr "LISTENING"') do (
+        echo [*] Port %%P busy ^(PID %%a^), stopping it first...
+        taskkill /PID %%a /T /F >nul 2>&1
+    )
+)
+REM Give the OS a moment to release the sockets.
+timeout /t 2 /nobreak >nul
+
+REM Verify the ports really are free before starting, so we never end up with
+REM two backends fighting over port 8000.
+set "busy="
+for %%P in (8000 5173) do (
+    netstat -ano 2>nul | findstr ":%%P " | findstr "LISTENING" >nul
+    if not errorlevel 1 set "busy=1"
+)
+if defined busy (
+    echo [X] Ports are still in use after cleanup. Please run stop.bat, then retry.
+    pause
+    exit /b 1
+)
 
 REM ---- launch via VBS (completely silent, no cmd windows) ----
 cscript //nologo "%ROOT%scripts\launch.vbs"
@@ -85,13 +107,18 @@ set "wait=0"
 :wait_backend
 timeout /t 1 /nobreak >nul
 set /a wait+=1
-netstat -ano 2>nul | findstr ":8000 " | findstr "LISTENING" >nul
+REM A listening socket is not proof of a working API: a half-dead process still
+REM holds the port. Probe /health over HTTP so a broken backend is caught here
+REM instead of surfacing later in the browser as ERR_CONNECTION_RESET.
+curl -fsS -m 3 http://127.0.0.1:8000/health >nul 2>&1
 if not errorlevel 1 (
-    echo [OK] Backend is running at http://localhost:8000
+    echo [OK] Backend is healthy at http://localhost:8000
     goto wait_frontend
 )
-if %wait% lss 30 goto wait_backend
-echo [!] Backend did not start within 30s. Check backend\logs\backend.log
+if %wait% lss 45 goto wait_backend
+echo [!] Backend did not become healthy within 45s.
+echo     Check the log: backend\logs\backend.log
+set "backend_failed=1"
 
 :wait_frontend
 echo [*] Waiting for frontend...
@@ -99,16 +126,37 @@ set "wait=0"
 :wait_fe_loop
 timeout /t 1 /nobreak >nul
 set /a wait+=1
-netstat -ano 2>nul | findstr ":5173 " | findstr "LISTENING" >nul
+REM Probe by hostname, not 127.0.0.1: Vite binds IPv6-only (::1) by default, so
+REM an IPv4 probe reports a false failure even though the server is fine.
+curl -fsS -m 3 http://localhost:5173/ >nul 2>&1
 if not errorlevel 1 (
     echo [OK] Frontend is running at http://localhost:5173
     goto started
 )
-if %wait% lss 30 goto wait_fe_loop
-echo [!] Frontend did not start within 30s. Check frontend\logs\frontend.log
+if %wait% lss 45 goto wait_fe_loop
+echo [!] Frontend did not start within 45s. Check frontend\logs\frontend.log
+set "frontend_failed=1"
 
 :started
 echo.
+if defined backend_failed (
+    echo ============================================
+    echo   [!] BACKEND FAILED TO START
+    echo.
+    echo   The UI will load but every action will fail.
+    echo   Last log lines:
+    echo   ------------------------------------------
+    powershell -NoProfile -Command "Get-Content '%~dp0backend\logs\backend.log' -Tail 12 -ErrorAction SilentlyContinue"
+    echo   ------------------------------------------
+    echo.
+    echo   Common causes: port still held by a stale process
+    echo   ^(run stop.bat^), or a missing dependency.
+    echo ============================================
+    echo.
+    pause
+    endlocal
+    exit /b 1
+)
 echo ============================================
 echo   Started successfully!
 echo.
