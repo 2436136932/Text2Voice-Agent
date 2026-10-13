@@ -240,6 +240,28 @@ export interface FetchModelsResponse {
 }
 
 /* ------------------------------------------------------------------ */
+/* Endpoint path discovery                                             */
+/* ------------------------------------------------------------------ */
+
+export interface ProbePathsRequest {
+  base_url: string
+  api_key: string
+}
+
+export interface ProbePathItem {
+  path: string
+  status: number | null
+  alive: boolean
+  note: string
+}
+
+export interface ProbePathsResponse {
+  base_url: string
+  results: ProbePathItem[]
+  suggested_path: string | null
+}
+
+/* ------------------------------------------------------------------ */
 /* Generation                                                          */
 /* ------------------------------------------------------------------ */
 

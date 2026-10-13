@@ -229,3 +229,70 @@ async def fetch_models(
     logger.info("fetched %d models from %s in %dms", len(models), base_url, latency)
 
     return FetchModelsResponse(models=models, total=len(models), base_url=base_url)
+
+
+# ---------------------------------------------------------------------------
+# Endpoint discovery
+# ---------------------------------------------------------------------------
+class ProbePathsRequest(BaseModel):
+    """Try the common TTS routes against a custom endpoint."""
+
+    base_url: str = Field(min_length=1, max_length=512)
+    api_key: SecretStr | None = None
+
+    model_config = {"extra": "forbid", "str_strip_whitespace": True}
+
+
+class ProbePathItem(BaseModel):
+    path: str
+    status: int | None = None
+    alive: bool = False
+    note: str = ""
+
+
+class ProbePathsResponse(BaseModel):
+    base_url: str
+    results: list[ProbePathItem]
+    suggested_path: str | None = None
+
+
+@router.post(
+    "/probe-paths",
+    response_model=ProbePathsResponse,
+    summary="探测自定义端点实际支持哪些语音合成路径",
+    description=(
+        "第三方网关往往不是 OpenAI 的标准路径。此接口并发探测一批常见路径"
+        "（/audio/speech、/tts、/text-to-speech…），返回每个路径的响应状态，"
+        "并给出建议路径。\n\n"
+        "判定标准：返回 400/401/403/422 等也表示**路径存在**（只是请求体或密钥"
+        "不合），只有 404 才说明该路径不存在。\n\n"
+        "密钥仅用于本次探测，不落库、不记录。"
+    ),
+    responses={
+        200: {"description": "探测完成"},
+        400: {"description": "缺少 base_url 或密钥"},
+    },
+)
+async def probe_paths(
+    payload: ProbePathsRequest,
+    _: RateLimitGenerate,
+) -> ProbePathsResponse:
+    from app.core.errors import AppError, ErrorCode
+    from app.services.endpoint_probe import best_path, probe_speech_paths
+
+    base_url = payload.base_url.rstrip("/")
+    api_key = payload.api_key.get_secret_value() if payload.api_key else ""
+    if not api_key:
+        raise AppError(
+            ErrorCode.MISSING_CREDENTIAL,
+            "请先填写 API Key 再探测接口路径。",
+            detail={"suggestion": "探测需要携带密钥，因为它会真实访问你的端点。"},
+        )
+
+    results = await probe_speech_paths(base_url, api_key)
+    found = best_path(results)
+    return ProbePathsResponse(
+        base_url=base_url,
+        results=[ProbePathItem(**item.to_dict()) for item in results],  # type: ignore[arg-type]
+        suggested_path=found,
+    )

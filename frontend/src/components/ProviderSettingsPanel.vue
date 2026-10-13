@@ -22,9 +22,9 @@ import {
   Star,
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { fetchModels, validateProvider } from '@/api'
+import { fetchModels, probePaths, validateProvider } from '@/api'
 import { ApiError } from '@/api/http'
-import type { FetchedModel, ProviderKind, ValidateProviderRequest } from '@/api/types'
+import type { FetchedModel, ProbePathItem, ProviderKind, ValidateProviderRequest } from '@/api/types'
 import { useConfigStore } from '@/stores/config'
 import { useSettingsStore } from '@/stores/settings'
 import { genderLabel } from '@/utils/format'
@@ -43,6 +43,9 @@ const fetchingModels = ref(false)
 const lastLatency = ref<number | null>(null)
 const fetchedModels = ref<FetchedModel[]>([])
 const advancedOpen = ref<string[]>([])
+const probingPaths = ref(false)
+const probeResults = ref<ProbePathItem[]>([])
+const suggestedPath = ref<string | null>(null)
 
 /* ------------------------------ bound fields ----------------------------- */
 
@@ -245,6 +248,33 @@ async function handleFetchModels(): Promise<void> {
     reportError(error, '获取模型失败')
   } finally {
     fetchingModels.value = false
+  }
+}
+
+async function handleProbePaths(): Promise<void> {
+  if (!canFetchModels.value) {
+    ElMessage.warning('请先填写 Base URL 和 API Key')
+    return
+  }
+  probingPaths.value = true
+  suggestedPath.value = null
+  try {
+    const result = await probePaths({
+      base_url: baseUrl.value.trim(),
+      api_key: apiKey.value,
+    })
+    probeResults.value = result.results
+    suggestedPath.value = result.suggested_path
+    const alive = result.results.filter((item) => item.alive)
+    if (alive.length === 0) {
+      ElMessage.warning('所有常见路径都没有响应，请查阅服务商文档确认接口地址')
+    } else {
+      ElMessage.success(`发现 ${alive.length} 个可用路径${result.suggested_path ? `，建议 ${result.suggested_path}` : ''}`)
+    }
+  } catch (error) {
+    reportError(error, '探测路径失败')
+  } finally {
+    probingPaths.value = false
   }
 }
 
@@ -531,10 +561,74 @@ function setAsDefault(): void {
               clearable
               spellcheck="false"
               placeholder="/audio/speech"
-            />
+            >
+              <template #append>
+                <el-button :loading="probingPaths" :disabled="!canFetchModels" @click="handleProbePaths">
+                  探测可用路径
+                </el-button>
+              </template>
+            </el-input>
             <div class="provider-panel__hint">
               默认 <span class="t2v-mono">/audio/speech</span>（OpenAI 标准）。
-              若服务商使用其他路径（如 <span class="t2v-mono">/tts</span>），在此修改。
+              若服务商使用其他路径（如 <span class="t2v-mono">/tts</span>），点右侧按钮自动探测。
+            </div>
+
+            <div v-if="probeResults.length > 0" class="provider-panel__probe">
+              <div class="provider-panel__probe-title">
+                探测结果（400/401/422 也表示路径存在，只有 404 才是没有）
+              </div>
+              <el-table :data="probeResults" size="small" max-height="240">
+                <el-table-column prop="path" label="路径" min-width="150">
+                  <template #default="{ row }">
+                    <span class="t2v-mono">{{ row.path }}</span>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="status" label="状态" width="70" />
+                <el-table-column label="结论" min-width="200">
+                  <template #default="{ row }">
+                    <el-tag :type="row.alive ? 'success' : 'info'" size="small" effect="plain">
+                      {{ row.alive ? '存在' : '无' }}
+                    </el-tag>
+                    <span class="provider-panel__probe-note">{{ row.note }}</span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="" width="80">
+                  <template #default="{ row }">
+                    <el-button
+                      v-if="row.alive"
+                      link
+                      type="primary"
+                      size="small"
+                      @click="configStore.ttsSpeechPath = row.path"
+                    >
+                      使用
+                    </el-button>
+                  </template>
+                </el-table-column>
+              </el-table>
+              <el-alert
+                v-if="suggestedPath"
+                class="provider-panel__probe-suggest"
+                type="success"
+                show-icon
+                :closable="false"
+                :title="`建议使用 ${suggestedPath}`"
+              >
+                <template #default>
+                  <el-button size="small" type="primary" @click="configStore.ttsSpeechPath = suggestedPath">
+                    填入该路径
+                  </el-button>
+                </template>
+              </el-alert>
+              <el-alert
+                v-else
+                class="provider-panel__probe-suggest"
+                type="warning"
+                show-icon
+                :closable="false"
+                title="常见路径都没有响应"
+                description="请查阅服务商文档确认接口地址；也可能是 base_url 或密钥有误。"
+              />
             </div>
           </el-form-item>
 
@@ -679,6 +773,26 @@ function setAsDefault(): void {
 .provider-panel__warn {
   margin-top: 8px;
   line-height: 1.6;
+}
+
+.provider-panel__probe {
+  margin-top: 12px;
+}
+
+.provider-panel__probe-title {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  margin-bottom: 6px;
+}
+
+.provider-panel__probe-note {
+  margin-left: 6px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.provider-panel__probe-suggest {
+  margin-top: 10px;
 }
 
 .provider-panel__tags {

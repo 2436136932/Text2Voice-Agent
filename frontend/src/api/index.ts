@@ -19,6 +19,8 @@ import type {
   HistoryListResponse,
   HistoryQuery,
   MediaInfo,
+  ProbePathsRequest,
+  ProbePathsResponse,
   ProvidersResponse,
   ServerSettings,
   TaskStatusResponse,
@@ -63,6 +65,11 @@ export function validateProvider(payload: ValidateProviderRequest): Promise<Vali
 /** `POST /providers/models` — fetch model list from a custom OpenAI-compatible endpoint. */
 export function fetchModels(payload: FetchModelsRequest): Promise<FetchModelsResponse> {
   return post<FetchModelsResponse>('/providers/models', payload)
+}
+
+/** `POST /providers/probe-paths` — discover which TTS routes a custom endpoint exposes. */
+export function probePaths(payload: ProbePathsRequest): Promise<ProbePathsResponse> {
+  return post<ProbePathsResponse>('/providers/probe-paths', payload)
 }
 
 /* ------------------------------------------------------------------ */

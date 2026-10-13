@@ -330,9 +330,16 @@ def map_upstream_error(
             retryable=False,
         )
     if status_code == 404:
+        # A 404 on a synthesis call is almost always a *path* problem, not a
+        # credential or model problem: the gateway simply has no handler at the
+        # route we guessed. Surface the exact URL so the user can compare it
+        # with their provider's docs and fix 「合成接口路径」.
         return AppError(
             ErrorCode(f"{prefix}_UPSTREAM_ERROR"),
-            f"{provider} 接口不存在（404），请检查模型名或 base_url 配置。",
+            (
+                f"{provider} 接口不存在（404）：{endpoint or '请求地址未知'}。"
+                "该服务商可能不使用此路径，请在「高级设置 → 合成接口路径」中改为其文档给出的路径。"
+            ),
             detail=detail,
             retryable=False,
         )
