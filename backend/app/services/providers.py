@@ -136,6 +136,10 @@ class ProviderService:
                 text="你好，这是一条语音测试。",
                 api_key=api_key,
                 voice=payload.voice or adapter.default_voice,
+                # The model must be forwarded: an OpenAI-compatible endpoint
+                # rejects a request that names a model it does not host (e.g.
+                # sending "gpt-4o-mini-tts" to a MiMo endpoint returns 404).
+                model=payload.model or "",
                 base_url=payload.base_url,
                 speed=payload.speed or 1.0,
                 audio_format=adapter.formats[0],

@@ -71,6 +71,11 @@ export interface ConfigState {
   ttsBaseUrl: string
   /** Model id for OpenAI-compatible TTS endpoints (e.g. mimo-v2.5-tts). */
   ttsModel: string
+  /**
+   * Synthesis route appended to the base URL for custom endpoints. OpenAI uses
+   * `/audio/speech`; some gateways differ, so it is user-editable.
+   */
+  ttsSpeechPath: string
   speed: number
   format: string
 
@@ -113,6 +118,7 @@ export const useConfigStore = defineStore('config', {
     ttsVoice: '',
     ttsBaseUrl: '',
     ttsModel: '',
+    ttsSpeechPath: '',
     speed: 1.0,
     format: 'mp3',
 
@@ -398,7 +404,11 @@ export const useConfigStore = defineStore('config', {
           speed: this.speed,
           format: this.format,
           base_url: this.ttsBaseUrlOrNull,
-          extra: {},
+          // Only custom endpoints need a route override; send it only when set
+          // so built-in providers keep their own defaults.
+          extra: this.ttsSpeechPath.trim()
+            ? { speech_path: this.ttsSpeechPath.trim() }
+            : {},
         },
         options,
       }

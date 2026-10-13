@@ -13,13 +13,26 @@ from app.adapters.tts.openai import OpenAITTSAdapter
 
 class CustomTTSAdapter(OpenAITTSAdapter):
     id = "custom"
-    name = "Custom TTS (OpenAI-compatible)"
+    name = "自定义 TTS (OpenAI 兼容)"
     default_voice = "alloy"
     default_base_url = ""
     api_key_hint = "sk-..."
     docs_url = ""
-    notes = "Any OpenAI-compatible TTS endpoint. Fill base_url + api_key, then click fetch-models."
+    notes = (
+        "接入任意 OpenAI 兼容的语音合成服务（含 mimo 等第三方）。"
+        "填写 Base URL 与 API Key 后点击「获取模型」自动拉取模型列表，"
+        "支持语音合成的模型会带 TTS 标记。"
+    )
     requires_base_url = True
+    supports_base_url = True
+    requires_api_key = True
+    #: Never fall back to an OpenAI model name: the endpoint belongs to someone
+    #: else and would 404 on "gpt-4o-mini-tts". The user picks a real model via
+    #: 「获取模型」, and we send exactly what they chose.
+    default_model_name = ""
+    #: Synthesize path appended to ``base_url``. Exposed to the UI as an
+    #: advanced field so non-standard gateways can be reached without code.
+    default_speech_path = "/audio/speech"
     # -- voice cloning ------------------------------------------------------
     # No vendor clone endpoint exists for an arbitrary OpenAI-compatible
     # gateway, but the reference clip can be forwarded on every synthesis call

@@ -82,12 +82,19 @@ class OpenAITTSAdapter(TTSAdapter):
         payload["default_model"] = "gpt-4o-mini-tts"
         return payload
 
+    #: Model used when the caller does not specify one. Subclasses that talk to
+    #: a *third-party* OpenAI-compatible gateway (``custom``) override this with
+    #: an empty string so we never send an OpenAI model name to a foreign host.
+    default_model_name: str = "gpt-4o-mini-tts"
+    #: Path appended to the base URL for synthesis.
+    default_speech_path: str = "/audio/speech"
+
     async def synthesize(self, request: TTSRequest) -> TTSResult:
         api_key = assert_credential(request.api_key, kind="tts", provider=self.id)
         self.check_length(request.text)
         audio_format = self.normalize_format(request.audio_format)
         voice = request.voice or self.default_voice
-        model = request.model or "gpt-4o-mini-tts"
+        model = request.model or self.default_model_name
 
         payload = {
             "model": model,
@@ -119,7 +126,13 @@ class OpenAITTSAdapter(TTSAdapter):
                     self.id, len(reference),
                 )
 
-        url = f"{self.resolve_base_url(request.base_url)}/audio/speech"
+        # Synthesis path is a class attribute so third-party gateways that use a
+        # different route (e.g. ``/tts`` instead of ``/audio/speech``) can be
+        # reached through the ``custom`` adapter's advanced settings.
+        path = str(request.extra.get("speech_path") or self.default_speech_path)
+        if not path.startswith("/"):
+            path = f"/{path}"
+        url = f"{self.resolve_base_url(request.base_url)}{path}"
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",

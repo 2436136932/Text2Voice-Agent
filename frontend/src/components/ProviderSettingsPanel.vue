@@ -136,6 +136,51 @@ const cloneHint = computed(
   () => (current.value as { clone_hint?: string } | null)?.clone_hint ?? '',
 )
 
+/**
+ * Domains each preset provider's models actually live on.
+ *
+ * Used to detect the common mistake of pasting a *third-party* base URL into a
+ * preset provider (e.g. a MiMo URL under "OpenAI TTS"), where the model list
+ * would silently keep showing the preset's own models and the user never
+ * realises they should have picked 「自定义」 instead.
+ */
+const PROVIDER_DOMAINS: Record<string, string[]> = {
+  openai: ['openai.com', 'azure.com'],
+  anthropic: ['anthropic.com'],
+  qwen: ['aliyuncs.com', 'dashscope'],
+  deepseek: ['deepseek.com'],
+  gemini: ['googleapis.com', 'google.com'],
+  zhipu: ['bigmodel.cn'],
+  moonshot: ['moonshot.cn'],
+  ollama: ['localhost', '127.0.0.1'],
+  elevenlabs: ['elevenlabs.io'],
+  azure: ['speech.microsoft.com', 'microsoft.com'],
+  volcengine: ['volcengine.com', 'bytedance.com'],
+  minimax: ['minimax.chat', 'minimaxi.com'],
+  edge: ['bing.com', 'microsoft.com'],
+}
+
+/**
+ * True when a preset provider is pointed at a host that is clearly not its own
+ * — i.e. the user is trying to reach a different vendor through the wrong
+ * provider entry.
+ */
+const foreignBaseUrl = computed<boolean>(() => {
+  if (isCustomProvider.value) return false
+  const raw = baseUrl.value.trim()
+  if (!raw) return false
+  const allowed = PROVIDER_DOMAINS[providerId.value]
+  if (!allowed) return false
+
+  let host = raw.toLowerCase()
+  try {
+    host = new URL(raw.includes('://') ? raw : `https://${raw}`).hostname
+  } catch {
+    return false
+  }
+  return !allowed.some((domain) => host.endsWith(domain))
+})
+
 /* ------------------------------- validation ------------------------------ */
 
 const canFetchModels = computed(
@@ -460,6 +505,37 @@ function setAsDefault(): void {
             <div class="provider-panel__hint">
               使用自建 / 代理网关时填写，需包含版本路径（通常是 /v1）。
             </div>
+            <el-alert
+              v-if="foreignBaseUrl"
+              class="provider-panel__warn"
+              type="warning"
+              show-icon
+              :closable="false"
+              title="这个 Base URL 看起来不属于当前服务商"
+            >
+              <template #default>
+                当前选的是「{{ current?.name }}」，它只提供
+                {{ isLLM ? '自家的大模型' : '自家的音色与模型' }}，改 Base URL 不会让模型列表变成对方的。
+                要接入第三方（例如 mimo），请把服务商切换为
+                <b>{{ isLLM ? '「自定义 (OpenAI 兼容)」' : '「自定义 TTS (OpenAI 兼容)」' }}</b>，
+                这样才能用「获取模型」拉取对方真实的模型列表。
+              </template>
+            </el-alert>
+          </el-form-item>
+
+          <!-- Custom TTS: synthesis path is configurable because gateways differ -->
+          <el-form-item v-if="isCustomProvider && !isLLM" label="合成接口路径">
+            <el-input
+              v-model="configStore.ttsSpeechPath"
+              class="provider-panel__control"
+              clearable
+              spellcheck="false"
+              placeholder="/audio/speech"
+            />
+            <div class="provider-panel__hint">
+              默认 <span class="t2v-mono">/audio/speech</span>（OpenAI 标准）。
+              若服务商使用其他路径（如 <span class="t2v-mono">/tts</span>），在此修改。
+            </div>
           </el-form-item>
 
           <el-form-item v-if="configStore.temperature !== undefined && isLLM" label="温度 (temperature)">
@@ -598,6 +674,11 @@ function setAsDefault(): void {
   font-size: 12px;
   line-height: 1.5;
   color: var(--el-text-color-secondary);
+}
+
+.provider-panel__warn {
+  margin-top: 8px;
+  line-height: 1.6;
 }
 
 .provider-panel__tags {

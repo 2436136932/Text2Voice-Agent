@@ -472,6 +472,15 @@ class BaseAdapter(ABC):
     #: provider is hidden from ``GET /providers`` (see
     #: :meth:`app.adapters.registry.AdapterRegistry.available_tts`).
     requires_extra: str | None = None
+    #: Whether the provider needs a user-supplied endpoint. Declared on the
+    #: class (not only in ``info()``) so subclasses that inherit an ``info()``
+    #: implementation from a parent vendor still report it correctly.
+    requires_base_url: bool = False
+    supports_base_url: bool = True
+    requires_api_key: bool = True
+    api_key_hint: str = ""
+    docs_url: str = ""
+    notes: str = ""
 
     @abstractmethod
     def info(self) -> AdapterInfo:
@@ -482,7 +491,28 @@ class BaseAdapter(ABC):
         raise NotImplementedError
 
     def describe(self) -> dict[str, Any]:
-        return self.info().to_dict()
+        """Serialize the adapter for ``GET /providers``.
+
+        The class attributes are treated as authoritative for the capability
+        flags. Several vendors implement ``info()`` by constructing
+        ``AdapterInfo`` field-by-field and inherit that method from a parent
+        (e.g. ``CustomTTSAdapter`` <- ``OpenAITTSAdapter``); without this sync a
+        subclass that sets ``requires_base_url = True`` would still be
+        advertised as ``false`` and the UI would never mark the field required.
+        """
+        payload = self.info().to_dict()
+        payload.update(
+            {
+                "requires_base_url": self.requires_base_url,
+                "supports_base_url": self.supports_base_url,
+                "requires_api_key": self.requires_api_key,
+                "requires_extra": self.requires_extra,
+                "api_key_hint": self.api_key_hint or payload.get("api_key_hint", ""),
+                "docs_url": self.docs_url or payload.get("docs_url", ""),
+                "notes": self.notes or payload.get("notes", ""),
+            }
+        )
+        return payload
 
 
 class LLMAdapter(BaseAdapter):
@@ -641,6 +671,10 @@ class TTSAdapter(BaseAdapter):
             text="测试",
             api_key=request.api_key,
             voice=request.voice or self.default_voice,
+            # Forward the model: OpenAI-compatible gateways 404 when asked for a
+            # model they do not host, so dropping it here would make "测试连接"
+            # fail for every custom endpoint even though synthesis works.
+            model=request.model or "",
             base_url=request.base_url,
             speed=1.0,
             audio_format=self.formats[0],
