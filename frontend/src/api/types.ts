@@ -221,7 +221,10 @@ export interface ValidateProviderResponse {
 /* ------------------------------------------------------------------ */
 
 export interface FetchModelsRequest {
-  base_url: string
+  /** Built-in provider id (e.g. `mimo`) or `custom`. */
+  provider: string
+  /** Required for `custom`; optional for built-ins that have a default. */
+  base_url?: string
   api_key: string
   kind: 'llm' | 'tts'
 }
@@ -231,12 +234,17 @@ export interface FetchedModel {
   name: string
   supports_tts: boolean
   owned_by: string
+  /** Local Chinese annotation re-attached by id (empty for brand-new models). */
+  note?: string
+  /** `upstream` = live API result, `local` = built-in fallback. */
+  source?: string
 }
 
 export interface FetchModelsResponse {
   models: FetchedModel[]
   total: number
   base_url: string
+  source: string
 }
 
 /* ------------------------------------------------------------------ */

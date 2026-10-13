@@ -195,12 +195,20 @@ const foreignBaseUrl = computed<boolean>(() => {
 
 /* ------------------------------- validation ------------------------------ */
 
-const canFetchModels = computed(
-  () =>
-    isCustomProvider.value &&
-    apiKey.value.trim().length > 0 &&
-    baseUrl.value.trim().length > 0,
-)
+/**
+ * The 获取模型 button is available for every provider, not just custom ones.
+ *
+ * Preset lists are hand-written annotations, not a source of truth: a vendor
+ * can add or retire a model at any time, so the user must be able to pull the
+ * live list. `custom` additionally requires a base URL; built-ins fall back to
+ * their own default endpoint.
+ */
+const canFetchModels = computed(() => {
+  if (apiKey.value.trim().length === 0) return false
+  if (isCustomProvider.value) return baseUrl.value.trim().length > 0
+  if (requiresBaseUrl.value) return baseUrl.value.trim().length > 0
+  return true
+})
 
 const canValidate = computed(() => {
   if (!providerId.value) return false
@@ -230,31 +238,39 @@ const keyHint = computed(() =>
 
 async function handleFetchModels(): Promise<void> {
   if (!canFetchModels.value) {
-    ElMessage.warning('请先填写 Base URL 和 API Key')
+    ElMessage.warning(
+      isCustomProvider.value ? '请先填写 Base URL 和 API Key' : '请先填写 API Key',
+    )
     return
   }
   fetchingModels.value = true
   try {
     const result = await fetchModels({
+      provider: providerId.value,
+      // Omitting base_url lets built-in providers use their own default.
       base_url: baseUrl.value.trim(),
       api_key: apiKey.value,
       kind: props.kind,
     })
     fetchedModels.value = result.models
     if (result.models.length === 0) {
-      ElMessage.warning('端点返回了空模型列表')
+      ElMessage.warning('上游返回了空模型列表')
       return
     }
+    const fresh = result.models.filter((item) => !item.note).length
     const ttsModels = result.models.filter((item) => item.supports_tts)
+    const extra = fresh > 0 ? `，其中 ${fresh} 个是本地未标注的新模型` : ''
     if (!isLLM.value && ttsModels.length > 0) {
-      ElMessage.success(`获取到 ${result.models.length} 个模型，其中 ${ttsModels.length} 个支持语音合成（带 TTS 标记）`)
-    } else if (!isLLM.value) {
-      ElMessage.warning(`获取到 ${result.models.length} 个模型，但未识别到支持语音合成的模型。请确认该服务商提供 TTS 能力。`)
+      ElMessage.success(
+        `已从上游获取 ${result.models.length} 个模型${extra}，${ttsModels.length} 个支持语音合成`,
+      )
     } else {
-      ElMessage.success(`获取到 ${result.models.length} 个模型`)
+      ElMessage.success(`已从上游获取 ${result.models.length} 个模型${extra}`)
     }
   } catch (error) {
-    reportError(error, '获取模型失败')
+    // Fall back to the built-in list, and say so rather than going blank.
+    reportError(error, '获取模型失败，当前仍显示内置列表')
+    ElMessage.warning('未能从上游获取模型列表，继续使用内置列表（可手动输入模型名）')
   } finally {
     fetchingModels.value = false
   }
@@ -502,7 +518,6 @@ function setAsDefault(): void {
             <el-option v-for="item in modelChoices" :key="item.id" :label="item.name" :value="item.id" />
           </el-select>
           <el-button
-            v-if="isCustomProvider"
             :icon="Download"
             :loading="fetchingModels"
             :disabled="!canFetchModels"
@@ -510,6 +525,19 @@ function setAsDefault(): void {
           >
             获取模型
           </el-button>
+        </div>
+        <div class="provider-panel__hint">
+          <template v-if="fetchedModels.length > 0">
+            列表来自上游实时接口（{{ fetchedModels.length }} 个）
+            <template v-if="fetchedModels.some((m) => !m.note)">
+              ，其中 <b>{{ fetchedModels.filter((m) => !m.note).length }}</b> 个是新增的未标注模型
+            </template>
+            。此前的内置列表仅作为兜底。
+          </template>
+          <template v-else>
+            当前显示的是<b>内置列表</b>。上游可能已增删模型，
+            点「获取模型」可拉取真实列表（新模型会自动出现，下线的不再可选）。
+          </template>
         </div>
       </el-form-item>
 
@@ -539,18 +567,13 @@ function setAsDefault(): void {
           <div v-if="cloneHint" class="provider-panel__hint">{{ cloneHint }}</div>
         </el-form-item>
 
-        <!-- TTS model: shown for custom endpoints (with TTS markers) and for
-             providers that declare their own audio models. -->
-        <el-form-item v-if="isCustomProvider || ttsProviderModels.length > 0" label="TTS 模型">
+        <!-- TTS model: always fetchable, with TTS capability markers -->
+        <el-form-item v-if="isCustomProvider || ttsProviderModels.length > 0 || fetchedModels.length > 0" label="TTS 模型">
           <div class="provider-panel__row">
             <el-select
               v-model="configStore.ttsModel"
               class="provider-panel__control provider-panel__grow"
-              :placeholder="
-                isCustomProvider
-                  ? '点击「获取模型」拉取，或直接输入模型名'
-                  : '使用服务商默认模型'
-              "
+              placeholder="点「获取模型」拉取，或直接输入模型名"
               filterable
               allow-create
               clearable
@@ -563,19 +586,28 @@ function setAsDefault(): void {
               >
                 <span class="provider-panel__option">
                   <span>{{ item.name }}</span>
-                  <el-tag
-                    v-if="isCustomProvider && 'supports_tts' in item && item.supports_tts"
-                    size="small"
-                    type="success"
-                    effect="dark"
-                  >
-                    TTS
-                  </el-tag>
+                  <span class="provider-panel__option-tags">
+                    <el-tag
+                      v-if="'supports_tts' in item && item.supports_tts"
+                      size="small"
+                      type="success"
+                      effect="dark"
+                    >
+                      TTS
+                    </el-tag>
+                    <el-tag
+                      v-if="'note' in item && item.note && fetchedModels.length > 0"
+                      size="small"
+                      type="info"
+                      effect="plain"
+                    >
+                      内置说明
+                    </el-tag>
+                  </span>
                 </span>
               </el-option>
             </el-select>
             <el-button
-              v-if="isCustomProvider"
               :icon="Download"
               :loading="fetchingModels"
               :disabled="!canFetchModels"
@@ -584,9 +616,14 @@ function setAsDefault(): void {
               获取模型
             </el-button>
           </div>
-          <div v-if="isCustomProvider" class="provider-panel__hint">
-            带 <el-tag size="small" type="success" effect="dark">TTS</el-tag>
-            标记的模型支持语音合成，请从中选择（例如 mimo-v2.5-tts）。
+          <div class="provider-panel__hint">
+            <template v-if="fetchedModels.length > 0">
+              列表来自上游实时接口（{{ fetchedModels.length }} 个）。
+              带 <el-tag size="small" type="success" effect="dark">TTS</el-tag> 的模型支持语音合成。
+            </template>
+            <template v-else>
+              当前显示<b>内置列表</b>。点「获取模型」拉取上游真实列表，避免选到已下线的模型。
+            </template>
           </div>
         </el-form-item>
       </template>

@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, status
 from pydantic import BaseModel, Field, SecretStr
 
+from app.adapters.registry import registry
 from app.api.deps import RateLimitDefault, RateLimitGenerate, SessionDep
 from app.schemas.generation import (
     ProviderListResponse,
@@ -18,12 +19,15 @@ router = APIRouter(prefix="/providers", tags=["服务商 Providers"])
 
 
 # ---------------------------------------------------------------------------
-# Fetch models from a custom OpenAI-compatible endpoint
+# Fetch models from upstream
 # ---------------------------------------------------------------------------
 class FetchModelsRequest(BaseModel):
-    """Ask the backend to call ``GET {base_url}/models`` and return the list."""
+    """Ask the backend to call the provider's ``GET /models`` endpoint."""
 
-    base_url: str = Field(min_length=1, max_length=512)
+    #: Provider id — a built-in one (``mimo``, ``openai``…) or ``custom``.
+    provider: str = Field(default="custom", max_length=32)
+    #: Required for ``custom``; optional for built-ins, which have a default.
+    base_url: str = Field(default="", max_length=512)
     api_key: SecretStr | None = None
     #: ``"llm"`` fetches chat models; ``"tts"`` fetches audio-speech models.
     kind: str = Field(default="llm", pattern="^(llm|tts)$")
@@ -36,12 +40,20 @@ class ModelItem(BaseModel):
     name: str
     supports_tts: bool = False
     owned_by: str = ""
+    #: Local Chinese annotation, re-attached by id (may be empty for a model the
+    #: vendor added since this build).
+    note: str = ""
+    #: ``"upstream"`` when it came from the live API, ``"local"`` for the
+    #: built-in fallback list.
+    source: str = "upstream"
 
 
 class FetchModelsResponse(BaseModel):
     models: list[ModelItem]
     total: int
     base_url: str
+    #: Where this list came from — lets the UI label it honestly.
+    source: str = "upstream"
 
 
 # Heuristic: model id patterns that indicate TTS / audio capability.
@@ -135,17 +147,25 @@ async def validate_provider(
 @router.post(
     "/models",
     response_model=FetchModelsResponse,
-    summary="从自定义 OpenAI 兼容端点拉取模型列表",
+    summary="从上游拉取真实模型列表",
     description=(
-        "用提交的 base_url + api_key 调用 `GET {base_url}/models`，"
-        "返回模型列表。当 kind=tts 时，会在支持语音合成的模型上标记 "
-        "`supports_tts=true`（按模型名启发式判断：含 tts/speech/audio/voice 等）。\n\n"
+        "调用服务商的 `GET {base_url}/models` 返回**上游真实**的模型列表，"
+        "避免本地预设列表在上游增删模型后过期。\n\n"
+        "`provider` 可传内置服务商 id（如 `mimo`、`openai`）或 `custom`：\n"
+        "* 内置服务商：`base_url` 可留空，自动使用其默认地址，"
+        "并按该服务商自己的认证方式发送密钥（例如 MiMo 用 `api-key`，"
+        "OpenAI 用 `Authorization: Bearer`）；\n"
+        "* `custom`：必须提供 `base_url`，按 OpenAI 兼容约定认证。\n\n"
+        "返回的每个模型都会带上本地注释（`note`）与 TTS 能力标记，"
+        "便于在保留中文说明的同时反映上游的真实情况。\n\n"
+        "**注意**：并非所有服务商都实现 `/models`（如 Anthropic、Azure）。"
+        "此时返回 502 并给出说明，前端应回退到内置列表。\n\n"
         "密钥仅用于本次请求，不落库、不记录。"
     ),
     responses={
-        200: {"description": "模型列表"},
-        400: {"description": "base_url 不合法或缺少密钥"},
-        502: {"description": "上游端点不可达或返回异常"},
+        200: {"description": "上游模型列表"},
+        400: {"description": "缺少必要参数（MISSING_CREDENTIAL / INVALID_PROVIDER）"},
+        502: {"description": "上游端点不可达、未实现 /models 或返回异常"},
     },
 )
 async def fetch_models(
@@ -154,35 +174,71 @@ async def fetch_models(
 ) -> FetchModelsResponse:
     import time
 
-    import httpx
-
     from app.adapters.base import get_http_client, map_upstream_error
     from app.core.errors import AppError, ErrorCode
     from app.core.logging import get_logger
+    from app.services.model_catalog import (
+        MIMO_AUTH_HEADER,
+        build_model_headers,
+        local_model_notes,
+        resolve_models_url,
+    )
 
     logger = get_logger(__name__)
 
-    base_url = payload.base_url.rstrip("/")
     api_key = payload.api_key.get_secret_value() if payload.api_key else ""
-
     if not api_key:
         raise AppError(
             ErrorCode.MISSING_CREDENTIAL,
             "请填写 API 密钥后再获取模型。",
-            detail={"kind": payload.kind},
+            detail={
+                "kind": payload.kind,
+                "suggestion": "上游的 /models 接口需要鉴权，请先填入有效的 API Key。",
+            },
         )
 
-    url = f"{base_url}/models"
-    headers = {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
+    # Resolve the endpoint from the *adapter* so built-in providers work without
+    # the user retyping a base URL, and so provider-specific auth is respected.
+    base_url = payload.base_url.strip()
+    provider_id = (payload.provider or "custom").strip().lower()
 
-    logger.info("fetching models from %s kind=%s", url, payload.kind)
+    try:
+        adapter = (
+            registry.llm(provider_id) if payload.kind == "llm" else registry.tts(provider_id)
+        )
+    except AppError as exc:
+        exc.detail.setdefault(
+            "suggestion",
+            "请确认服务商 id 正确；自定义端点请选择「自定义 (OpenAI 兼容)」。",
+        )
+        raise
+
+    effective_base = adapter.resolve_base_url(base_url or None)
+    if not effective_base:
+        raise AppError(
+            ErrorCode.INVALID_PROVIDER,
+            f"{adapter.name} 需要 base_url 才能获取模型列表。",
+            detail={
+                "provider": provider_id,
+                "suggestion": "请在「高级设置 → Base URL」中填写接口地址（如 https://api.example.com/v1）。",
+            },
+        )
+
+    url, headers = resolve_models_url(
+        effective_base,
+        api_key,
+        provider_id=provider_id,
+        kind=payload.kind,
+    )
+
+    logger.info("fetching models provider=%s url=%s kind=%s", provider_id, url, payload.kind)
     started = time.perf_counter()
     client = get_http_client()
     try:
         response = await client.get(url, headers=headers, timeout=20.0)
     except Exception as exc:
         raise map_upstream_error(
-            kind="llm", provider="custom", exception=exc, endpoint=url
+            kind="llm", provider=provider_id, exception=exc, endpoint=url
         ) from exc
 
     if response.status_code >= 400:
@@ -190,18 +246,28 @@ async def fetch_models(
             body = response.json()
         except Exception:
             body = response.text
-        raise map_upstream_error(
-            kind="llm", provider="custom", status_code=response.status_code,
+        error = map_upstream_error(
+            kind="llm", provider=provider_id, status_code=response.status_code,
             body=body, endpoint=url,
         )
+        # Make the fallback path explicit for the UI.
+        error.detail.setdefault(
+            "suggestion",
+            f"{adapter.name} 未提供可用的 /models 接口，请手动输入模型名。"
+            "当前显示的仍是内置列表。",
+        )
+        raise error
 
     try:
         data = response.json()
     except Exception as exc:
         raise AppError(
             ErrorCode.LLM_UPSTREAM_ERROR,
-            f"端点返回了非 JSON 响应，无法解析模型列表。",
-            detail={"base_url": base_url},
+            "端点返回了非 JSON 响应，无法解析模型列表。",
+            detail={
+                "base_url": effective_base,
+                "suggestion": "请确认该地址是 API 端点而不是网页地址。",
+            },
             retryable=False,
         ) from exc
 
@@ -210,6 +276,8 @@ async def fetch_models(
     if not raw_models and isinstance(data, list):
         raw_models = data  # some endpoints return a bare list
 
+    notes = local_model_notes(provider_id, payload.kind)
+
     models: list[ModelItem] = []
     for item in raw_models:
         if not isinstance(item, dict):
@@ -217,18 +285,26 @@ async def fetch_models(
         model_id = str(item.get("id", "")).strip()
         if not model_id:
             continue
-        supports_tts = _looks_like_tts(model_id) if payload.kind == "tts" else False
         models.append(ModelItem(
             id=model_id,
             name=model_id,
-            supports_tts=supports_tts,
+            supports_tts=_looks_like_tts(model_id) if payload.kind == "tts" else False,
             owned_by=str(item.get("owned_by", "")),
+            note=notes.get(model_id, ""),
+            source="upstream",
         ))
 
     latency = int((time.perf_counter() - started) * 1000)
-    logger.info("fetched %d models from %s in %dms", len(models), base_url, latency)
+    logger.info(
+        "fetched %d upstream models provider=%s in %dms", len(models), provider_id, latency
+    )
 
-    return FetchModelsResponse(models=models, total=len(models), base_url=base_url)
+    return FetchModelsResponse(
+        models=models,
+        total=len(models),
+        base_url=effective_base,
+        source="upstream",
+    )
 
 
 # ---------------------------------------------------------------------------
