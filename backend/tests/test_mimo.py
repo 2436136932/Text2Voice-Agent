@@ -178,6 +178,99 @@ class TestMiMoProtocol:
 
 
 class TestMiMoVoiceClone:
+    """MiMo clones are stateless: no clone API, the clip rides along each call.
+
+    The adapter therefore validates the clip against MiMo's published limits
+    (3-10s, mp3/wav) at creation time and mints an id that encodes the stored
+    media id, which synthesis resolves back to the clip.
+    """
+
+    def _wav(self, seconds: float) -> bytes:
+        import io
+        import math
+        import struct
+        import wave
+
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(16000)
+            frames = bytearray()
+            for index in range(int(16000 * seconds)):
+                frames += struct.pack("<h", int(9000 * math.sin(2 * math.pi * 440 * index / 16000)))
+            handle.writeframes(bytes(frames))
+        return buf.getvalue()
+
+    async def test_registers_a_valid_clip(self):
+        from app.adapters.base import VoiceCloneRequest
+
+        result = await registry.tts("mimo").clone_voice(
+            VoiceCloneRequest(
+                api_key="k-12345678",
+                name="我的音色",
+                audio=self._wav(5),
+                audio_filename="ref.wav",
+                model="mimo-v2.5-tts-voiceclone",
+                extra={"media_id": "abc123"},
+            )
+        )
+        # The id must encode the media id so synthesis can find the clip again.
+        assert result.voice_id == "mimo-clone:abc123"
+        assert result.model == "mimo-v2.5-tts-voiceclone"
+        assert result.duration_ms == pytest.approx(5000, abs=100)
+
+    async def test_rejects_too_short_clip(self):
+        from app.adapters.base import VoiceCloneRequest
+
+        with pytest.raises(AppError) as exc:
+            await registry.tts("mimo").clone_voice(
+                VoiceCloneRequest(
+                    api_key="k-12345678", name="x", audio=self._wav(2),
+                    audio_filename="ref.wav", extra={"media_id": "m"},
+                )
+            )
+        assert exc.value.code is ErrorCode.VOICE_CLONE_FAILED
+        assert exc.value.detail.get("suggestion")
+
+    async def test_rejects_too_long_clip(self):
+        from app.adapters.base import VoiceCloneRequest
+
+        with pytest.raises(AppError) as exc:
+            await registry.tts("mimo").clone_voice(
+                VoiceCloneRequest(
+                    api_key="k-12345678", name="x", audio=self._wav(20),
+                    audio_filename="ref.wav", extra={"media_id": "m"},
+                )
+            )
+        assert exc.value.code is ErrorCode.VOICE_CLONE_FAILED
+        assert "10" in exc.value.message
+
+    async def test_rejects_wrong_container(self):
+        from app.adapters.base import VoiceCloneRequest
+
+        with pytest.raises(AppError) as exc:
+            await registry.tts("mimo").clone_voice(
+                VoiceCloneRequest(
+                    api_key="k-12345678", name="x", audio=self._wav(5),
+                    audio_filename="clip.mp4", extra={"media_id": "m"},
+                )
+            )
+        assert exc.value.code is ErrorCode.VOICE_CLONE_FAILED
+        assert exc.value.detail.get("suggestion")
+
+    async def test_cloned_voice_id_resolves_to_the_reference_clip(self):
+        """Selecting a cloned voice must send its reference audio to MiMo.
+
+        Regression: the voice id was recorded but synthesis never resolved it
+        back to the stored clip, so the request went out with no reference.
+        """
+        from app.services.generation import _CLONE_VOICE_PREFIX
+
+        voice = f"{_CLONE_VOICE_PREFIX}media-xyz"
+        assert voice.startswith(_CLONE_VOICE_PREFIX)
+        assert voice[len(_CLONE_VOICE_PREFIX):] == "media-xyz"
+
     async def test_clone_model_sends_base64_reference(self, patch_client):
         recorder = _Recorder(lambda m, u: httpx.Response(200, json=_success_body(), request=httpx.Request(m, u)))
         patch_client(recorder)

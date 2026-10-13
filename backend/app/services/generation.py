@@ -59,6 +59,12 @@ logger = get_logger(__name__)
 
 ProgressCallback = Callable[[str, int, str], None]
 
+#: Prefix for voice ids that stand for a stored reference clip rather than a
+#: vendor-side voice. Providers whose cloning is stateless (MiMo sends the
+#: reference on every call) mint ids in this form, and synthesis resolves them
+#: back to the clip.
+_CLONE_VOICE_PREFIX = "mimo-clone:"
+
 #: Failures that are the *caller's* fault and must never be masked by the
 #: degradation path - retrying or faking a result would be misleading.
 NON_DEGRADABLE_CODES = frozenset(
@@ -256,16 +262,30 @@ class GenerationService:
         on_progress("tts", 60, f"正在调用 {adapter.name} 合成语音…")
 
         extra = dict(request.tts.extra)
-        if request.options.reference_media_id:
+
+        # A cloned voice id can *be* a reference to a stored clip. MiMo works
+        # this way: `mimo-v2.5-tts-voiceclone` receives the reference audio on
+        # every call, so selecting the cloned voice must resolve back to the
+        # clip that created it. Without this the request went out with no
+        # reference and the vendor rejected it.
+        resolved_media_id = request.options.reference_media_id
+        if not resolved_media_id and voice.startswith(_CLONE_VOICE_PREFIX):
+            resolved_media_id = voice[len(_CLONE_VOICE_PREFIX) :].strip() or None
+            logger.info(
+                "resolved cloned voice to reference clip voice=%s media_id=%s",
+                voice, resolved_media_id,
+            )
+
+        if resolved_media_id:
             # Resolve the clip first: if the upload is gone, that is the
             # actionable problem ("上传已过期"), and reporting a capability
             # mismatch instead would send the user down the wrong path.
             try:
-                record = media_store.load(request.options.reference_media_id)
+                record = media_store.load(resolved_media_id)
                 reference_bytes = media_store.read_bytes(record)
             except AppError as exc:
                 if exc.code is ErrorCode.MEDIA_NOT_FOUND:
-                    raise media_missing_error(request.options.reference_media_id) from exc
+                    raise media_missing_error(resolved_media_id) from exc
                 raise
 
             # Then validate the capability, *before* spending a TTS call: a
@@ -282,7 +302,7 @@ class GenerationService:
             logger.info(
                 "tts reference audio resolved provider=%s media_id=%s bytes=%s",
                 adapter.id,
-                request.options.reference_media_id,
+                resolved_media_id,
                 len(reference_bytes),
             )
 

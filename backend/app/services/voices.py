@@ -185,7 +185,9 @@ class VoiceService:
             audio=audio,
             audio_filename=record.filename,
             model=model or self.default_clone_model(adapter),
-            extra=dict(extra or {}),
+            # Provenance for providers whose clone is stateless: the adapter can
+            # encode this into the voice id so synthesis can find the clip again.
+            extra={"media_id": record.media_id, **dict(extra or {})},
         )
 
         logger.info(

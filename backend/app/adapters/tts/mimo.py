@@ -40,12 +40,16 @@ from __future__ import annotations
 import base64
 import binascii
 import time
+import uuid
+from pathlib import Path
 
 from app.adapters.base import (
     AdapterInfo,
     TTSAdapter,
     TTSRequest,
     TTSResult,
+    VoiceCloneRequest,
+    VoiceCloneResult,
     VoiceInfo,
     request_json,
 )
@@ -160,6 +164,104 @@ class MiMoTTSAdapter(TTSAdapter):
         payload["default_model"] = MODEL_TTS
         payload["models"] = list(self.models)
         return payload
+
+    # ------------------------------------------------------------------
+    # Voice cloning
+    # ------------------------------------------------------------------
+    #: MiMo's reference clip must be 3–10 seconds of mp3 or wav (per its docs).
+    CLONE_MIN_MS = 3_000
+    CLONE_MAX_MS = 10_000
+    CLONE_FORMATS = ("mp3", "wav")
+
+    async def clone_voice(self, request: VoiceCloneRequest) -> VoiceCloneResult:
+        """Register a reference clip for ``mimo-v2.5-tts-voiceclone``.
+
+        MiMo has no独立 clone endpoint: ``mimo-v2.5-tts-voiceclone`` takes the
+        reference audio as base64 in ``audio.voice`` **on every synthesis call**.
+        So "cloning" here means validating the clip against MiMo's published
+        limits and recording enough metadata for synthesis to reuse it, rather
+        than calling a vendor API.
+
+        Validation happens now rather than at first use because the vendor
+        rejects out-of-range clips with an opaque error, and the user would have
+        no idea whether the problem was the clip, the key, or the model.
+        """
+        from app.services.audio import estimate_duration_ms
+
+        if not request.audio:
+            raise AppError(
+                ErrorCode.VOICE_CLONE_FAILED,
+                "参考音频为空，无法创建音色。",
+                detail={
+                    "provider": self.id,
+                    "suggestion": "请重新上传一段 3–10 秒的清晰单人语音。",
+                },
+            )
+
+        extension = (Path(request.audio_filename).suffix.lstrip(".") or "wav").lower()
+        if extension not in self.CLONE_FORMATS:
+            raise AppError(
+                ErrorCode.VOICE_CLONE_FAILED,
+                f"MiMo 声音克隆只接受 {' / '.join(self.CLONE_FORMATS)} 格式的参考音频，"
+                f"当前是 .{extension}。",
+                detail={
+                    "provider": self.id,
+                    "format": extension,
+                    "supported": list(self.CLONE_FORMATS),
+                    "suggestion": (
+                        "请在声音克隆页用「应用裁剪」导出 WAV 片段后再创建音色。"
+                    ),
+                },
+            )
+
+        duration_ms = estimate_duration_ms(request.audio, extension)
+        if duration_ms is not None:
+            if duration_ms < self.CLONE_MIN_MS:
+                raise AppError(
+                    ErrorCode.VOICE_CLONE_FAILED,
+                    f"参考音频太短（{duration_ms / 1000:.1f} 秒），MiMo 要求至少 3 秒。",
+                    detail={
+                        "provider": self.id,
+                        "duration_ms": duration_ms,
+                        "min_ms": self.CLONE_MIN_MS,
+                        "suggestion": "请选择更长、包含完整语句的片段（建议 5–10 秒）。",
+                    },
+                )
+            if duration_ms > self.CLONE_MAX_MS:
+                raise AppError(
+                    ErrorCode.VOICE_CLONE_FAILED,
+                    f"参考音频太长（{duration_ms / 1000:.1f} 秒），MiMo 要求不超过 10 秒。",
+                    detail={
+                        "provider": self.id,
+                        "duration_ms": duration_ms,
+                        "max_ms": self.CLONE_MAX_MS,
+                        "suggestion": (
+                            "请用裁剪滑块把片段缩短到 5–10 秒——更长的参考音频并不会"
+                            "提升克隆效果。"
+                        ),
+                    },
+                )
+
+        # The id is a deterministic handle: synthesis resolves it back to the
+        # stored clip. Encoding the media id keeps the mapping inspectable and
+        # avoids a second registry.
+        voice_id = f"mimo-clone:{request.extra.get('media_id') or uuid.uuid4().hex}"
+
+        logger.info(
+            "mimo voice clone registered name=%s voice_id=%s duration_ms=%s bytes=%s",
+            request.name, voice_id, duration_ms, len(request.audio),
+        )
+        return VoiceCloneResult(
+            voice_id=voice_id,
+            provider=self.id,
+            name=request.name,
+            model=MODEL_VOICE_CLONE,
+            duration_ms=duration_ms,
+            extra={
+                "reference_audio_b64": base64.b64encode(request.audio).decode("ascii"),
+                "note": "MiMo 在每次合成时都需要参考音频，已在创建时保存。",
+            },
+        )
 
     # ------------------------------------------------------------------
     def build_payload(self, request: TTSRequest, model: str, audio_format: str) -> dict:
