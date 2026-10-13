@@ -10,7 +10,7 @@
  * localStorage only when the user explicitly enables "自动保存配置". The panel
  * never sends a key to `/settings`.
  */
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import {
   ChatDotRound,
   Connection,
@@ -20,10 +20,11 @@ import {
   Microphone,
   QuestionFilled,
 } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
-import { fetchDebugCapture, fetchModels, probePaths, validateProvider } from '@/api'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { deleteVoice, fetchDebugCapture, fetchModels, fetchVoices, probePaths, validateProvider } from '@/api'
 import { ApiError } from '@/api/http'
 import type {
+  ClonedVoice,
   DebugCaptureRecord,
   FetchedModel,
   ProbePathItem,
@@ -111,6 +112,56 @@ const apiKeyPlaceholder = computed(() => current.value?.api_key_hint || '请输�
 const keyOptional = computed(() => (current.value as { requires_api_key?: boolean } | null)?.requires_api_key === false)
 
 const isCustomProvider = computed(() => providerId.value === 'custom')
+
+/* --------------------------- cloned voice list --------------------------- */
+
+const clonedVoices = ref<ClonedVoice[]>([])
+const deletingVoiceId = ref<number | null>(null)
+
+async function loadClonedVoices(): Promise<void> {
+  if (isLLM.value) return
+  try {
+    const all = (await fetchVoices()).items
+    // Only the voices registered for the provider this panel edits.
+    clonedVoices.value = all.filter((item) => item.provider === providerId.value)
+  } catch {
+    // Best-effort: the picker works fine without the management list.
+    clonedVoices.value = []
+  }
+}
+
+async function handleDeleteVoice(item: ClonedVoice): Promise<void> {
+  try {
+    await ElMessageBox.confirm(`删除克隆音色「${item.name}」？此操作不可恢复。`, '删除克隆音色', {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+    })
+  } catch {
+    return // user canceled
+  }
+  deletingVoiceId.value = item.id
+  try {
+    await deleteVoice(item.id)
+    clonedVoices.value = clonedVoices.value.filter((v) => v.id !== item.id)
+    // If the deleted voice was selected, fall back to the provider default.
+    if (voice.value === item.voice_id) {
+      voice.value = (current.value as { default_voice?: string | null } | null)?.default_voice ?? ''
+    }
+    ElMessage.success('克隆音色已删除')
+  } catch (error) {
+    ElMessage.error(error instanceof ApiError ? error.message : '删除失败，请稍后重试')
+  } finally {
+    deletingVoiceId.value = null
+  }
+}
+
+watch(providerId, () => {
+  void loadClonedVoices()
+})
+onMounted(() => {
+  void loadClonedVoices()
+})
 
 /** Model list for the LLM selector (fetched list wins when present). */
 const modelChoices = computed(() => {
@@ -554,6 +605,27 @@ function reportError(error: unknown, fallback: string): void {
           <div v-if="cloneHint" class="provider-panel__hint">{{ cloneHint }}</div>
         </el-form-item>
 
+        <!-- Locally registered clone voices: pick, or delete the stale ones.
+             Creation happens on the generate page (clone mode); this list only
+             manages the ones already registered. -->
+        <el-form-item v-if="!isLLM && clonedVoices.length > 0" label="已克隆音色（本机）">
+          <div class="provider-panel__clone-list">
+            <div v-for="item in clonedVoices" :key="item.id" class="provider-panel__clone-row">
+              <el-icon class="provider-panel__clone-icon"><Microphone /></el-icon>
+              <span class="provider-panel__clone-name">{{ item.name }}</span>
+              <el-button
+                link
+                type="danger"
+                size="small"
+                :loading="deletingVoiceId === item.id"
+                @click="handleDeleteVoice(item)"
+              >
+                删除
+              </el-button>
+            </div>
+          </div>
+        </el-form-item>
+
         <!-- TTS model: always fetchable, with TTS capability markers -->
         <el-form-item v-if="isCustomProvider || ttsProviderModels.length > 0 || fetchedModels.length > 0" label="TTS 模型">
           <div class="provider-panel__row">
@@ -871,6 +943,33 @@ function reportError(error: unknown, fallback: string): void {
   font-size: 12px;
   line-height: 1.5;
   color: var(--el-text-color-secondary);
+}
+
+.provider-panel__clone-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+
+.provider-panel__clone-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--el-fill-color-light);
+}
+
+.provider-panel__clone-icon {
+  color: var(--el-color-warning);
+}
+
+.provider-panel__clone-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .provider-panel__warn {

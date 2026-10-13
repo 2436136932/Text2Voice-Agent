@@ -21,7 +21,6 @@ import { Delete, InfoFilled, Refresh, Setting } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import ErrorAlert from '@/components/ErrorAlert.vue'
 import ProviderSettingsPanel from '@/components/ProviderSettingsPanel.vue'
-import VoiceClonePanel from '@/components/VoiceClonePanel.vue'
 import { ApiError } from '@/api/http'
 import type { UpdateSettingsRequest } from '@/api/types'
 import { useConfigStore } from '@/stores/config'
@@ -195,10 +194,6 @@ function handleAutoSaveChange(value: boolean): void {
         <ProviderSettingsPanel kind="llm" />
         <ProviderSettingsPanel kind="tts" />
       </div>
-
-      <el-divider />
-
-      <VoiceClonePanel />
     </el-card>
 
     <!-- ================= 2. 请求与保存 ================= -->
