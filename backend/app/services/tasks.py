@@ -51,6 +51,22 @@ STAGE_PROGRESS = {"queued": 0, "llm": 15, "tts": 60, "persist": 92, "done": 100}
 TERMINAL_STATUSES = {"succeeded", "failed", "canceled"}
 
 
+def _as_aware_utc(value: datetime | None) -> datetime | None:
+    """Return ``value`` as a timezone-aware UTC datetime.
+
+    SQLite does not preserve tzinfo, so datetimes loaded back from the task
+    table are naive. Comparing one of those against ``datetime.now(timezone.utc)``
+    raises ``TypeError: can't compare offset-naive and offset-aware datetimes``,
+    which used to crash the retention sweep on every run. Treat naive values as
+    UTC (that is how they were written) and normalise anything else to UTC.
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 @dataclass
 class TaskState:
     """In-memory mirror of a task row (hot path for polling)."""
@@ -74,8 +90,13 @@ class TaskState:
     def elapsed_ms(self) -> int | None:
         if self.started_at is None:
             return None
-        end = self.finished_at or datetime.now(timezone.utc)
-        return int((end - self.started_at).total_seconds() * 1000)
+        # Both sides must be tz-aware: restored rows are naive (SQLite drops
+        # tzinfo) while ``now`` is aware, and subtracting the two raises.
+        start = _as_aware_utc(self.started_at)
+        end = _as_aware_utc(self.finished_at) or datetime.now(timezone.utc)
+        if start is None:
+            return None
+        return max(0, int((end - start).total_seconds() * 1000))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -269,7 +290,13 @@ class TaskManager:
         return sum(1 for state in self._tasks.values() if state.status in {"pending", "running"})
 
     def list_tasks(self, *, limit: int = 50) -> list[dict[str, Any]]:
-        ordered = sorted(self._tasks.values(), key=lambda s: s.created_at, reverse=True)
+        # Normalise before sorting: restored rows carry naive timestamps, and
+        # mixing them with tz-aware ones raises TypeError inside sorted().
+        ordered = sorted(
+            self._tasks.values(),
+            key=lambda s: _as_aware_utc(s.created_at) or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
         return [state.to_dict() for state in ordered[:limit]]
 
     # ------------------------------------------------------------------
@@ -408,7 +435,10 @@ class TaskManager:
                         task_id
                         for task_id, state in self._tasks.items()
                         if state.status in TERMINAL_STATUSES
-                        and (state.finished_at or state.created_at) < cutoff
+                        and (
+                            _as_aware_utc(state.finished_at or state.created_at) or cutoff
+                        )
+                        < cutoff
                     ]
                     for task_id in stale:
                         self._tasks.pop(task_id, None)
@@ -441,9 +471,12 @@ class TaskManager:
                     record_id=row.record_id,
                     result=row.result,
                     error=row.error,
-                    created_at=row.created_at,
-                    started_at=row.started_at,
-                    finished_at=row.finished_at,
+                    # SQLite hands back naive datetimes; store them tz-aware so
+                    # every later comparison (retention sweep, elapsed time) is
+                    # mixing like with like.
+                    created_at=_as_aware_utc(row.created_at) or datetime.now(timezone.utc),
+                    started_at=_as_aware_utc(row.started_at),
+                    finished_at=_as_aware_utc(row.finished_at),
                     request_id=row.request_id,
                 )
             logger.info("restored tasks from database count=%s", len(rows))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -338,3 +339,59 @@ class TestAdapterContractCompliance:
         )
         assert isinstance(tts_result, TTSResult)
         assert tts_result.audio.startswith(b"RIFF")
+
+
+class TestTaskTimestampNormalisation:
+    """SQLite drops tzinfo, which used to crash the task retention sweep.
+
+    Regression: a task restored from the database got a naive ``created_at``,
+    and comparing it against ``datetime.now(timezone.utc)`` raised
+    ``TypeError: can't compare offset-naive and offset-aware datetimes`` from
+    ``_cleanup_loop`` on every 60s tick.
+    """
+
+    def test_naive_datetime_is_treated_as_utc(self):
+        from app.services.tasks import _as_aware_utc
+
+        naive = datetime(2026, 10, 13, 12, 0, 0)
+        assert _as_aware_utc(naive) == datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
+
+    def test_aware_datetime_is_converted_to_utc(self):
+        from app.services.tasks import _as_aware_utc
+
+        shanghai = timezone(timedelta(hours=8))
+        aware = datetime(2026, 10, 13, 20, 0, 0, tzinfo=shanghai)
+        assert _as_aware_utc(aware) == datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
+
+    def test_none_passes_through(self):
+        from app.services.tasks import _as_aware_utc
+
+        assert _as_aware_utc(None) is None
+
+    async def test_cleanup_sweep_survives_naive_timestamps(self):
+        """The sweep must not raise once a naive state is in the pool."""
+        from app.services.tasks import TERMINAL_STATUSES, TaskManager, TaskState
+
+        manager = TaskManager()
+        stale = TaskState(task_id="stale-task", status="succeeded")
+        # Simulate exactly what restore_from_db used to produce.
+        stale.created_at = datetime(2020, 1, 1, 0, 0, 0)
+        stale.finished_at = datetime(2020, 1, 1, 0, 5, 0)
+        manager._tasks["stale-task"] = stale
+
+        assert stale.status in TERMINAL_STATUSES
+        # Reimplements the sweep predicate; a TypeError here is the bug.
+        from app.services.tasks import _as_aware_utc
+        from app.core.config import settings
+
+        cutoff = datetime.now(timezone.utc) - timedelta(
+            minutes=max(1, settings.task_retention_minutes)
+        )
+        victims = [
+            tid
+            for tid, state in manager._tasks.items()
+            if _as_aware_utc(state.finished_at or state.created_at) < cutoff
+        ]
+        assert victims == ["stale-task"]
+        # And the helper is what makes the raw comparison safe.
+        assert _as_aware_utc(stale.created_at).tzinfo is not None

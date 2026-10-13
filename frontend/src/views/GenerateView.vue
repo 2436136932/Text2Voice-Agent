@@ -371,7 +371,12 @@ const referenceHint = computed<string>(() => {
 
     <div class="generate-view__grid">
       <div class="generate-view__left">
-        <TextInputCard />
+        <TextInputCard
+          :generating="busy"
+          :can-generate="canSubmit"
+          :extra-reasons="cloneBlockReason ? [cloneBlockReason] : []"
+          @generate="runGeneration()"
+        />
 
         <el-card class="params-card" shadow="never">
           <template #header>
@@ -452,27 +457,10 @@ const referenceHint = computed<string>(() => {
           </el-form>
         </el-card>
 
-        <!-- ---------------- 提交 ---------------- -->
-        <el-card class="submit-card" shadow="never">
-          <el-tooltip
-            :disabled="canSubmit"
-            :content="blockingReasons.join('；')"
-            placement="top"
-          >
-            <span class="submit-card__wrap">
-              <el-button
-                type="primary"
-                size="large"
-                :loading="busy"
-                :disabled="!canSubmit"
-                :icon="activeMode.icon as never"
-                @click="runGeneration()"
-              >
-                {{ busy ? '生成中…' : '开始生成' }}
-              </el-button>
-            </span>
-          </el-tooltip>
-
+        <!-- ---------------- 提交状态 ----------------
+             没有提交按钮：提交入口只有一个，就在文本卡片里紧挨输入框的
+             「生成语音」。这里只显示阻塞原因和进度，避免两个功能相同的按钮。 -->
+        <el-card v-if="blockingReasons.length > 0 || busy" class="submit-card" shadow="never">
           <div v-if="blockingReasons.length > 0" class="submit-card__reasons">
             <div v-for="reason in blockingReasons" :key="reason" class="submit-card__reason">
               <el-icon><Warning /></el-icon>
@@ -503,7 +491,7 @@ const referenceHint = computed<string>(() => {
         <el-card v-else class="placeholder-card" shadow="never">
           <el-empty description="生成结果会显示在这里">
             <template #description>
-              <p class="t2v-muted">填写文本后点击「开始生成」</p>
+              <p class="t2v-muted">填写文本后点击「生成语音」</p>
             </template>
           </el-empty>
         </el-card>
