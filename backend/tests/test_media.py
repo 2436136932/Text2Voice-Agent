@@ -16,6 +16,7 @@ import pytest
 
 from app.core.errors import ErrorCode
 from app.services import media as media_module
+from app.services.tools import ToolStatus
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +65,44 @@ def no_ffmpeg(monkeypatch) -> None:
 # Inspect
 # ---------------------------------------------------------------------------
 class TestMediaInspect:
+    async def test_video_duration_is_probed_with_ffprobe_when_available(self, client, monkeypatch):
+        """A video's duration must be read once ffmpeg is present.
+
+        Without it the trim slider has no timeline, so the user cannot pick the
+        segment to clone from — which is the whole point of uploading a video.
+        """
+        import app.services.media as media_mod
+
+        monkeypatch.setattr(
+            media_mod, "ffmpeg_status", lambda **_: ToolStatus(available=True, path="ffmpeg")
+        )
+        monkeypatch.setattr(media_mod, "ffprobe_path", lambda: "ffprobe")
+        monkeypatch.setattr(media_mod, "_ffprobe_duration_ms", lambda path: 12_345)
+        monkeypatch.setattr(media_mod, "_has_audio_stream", lambda path: True)
+
+        response = await upload(client, b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 128, "clip.mp4")
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["kind"] == "video"
+        assert payload["duration_ms"] == 12_345
+        assert payload["trimmable"] is True
+
+    async def test_silent_video_warns_that_it_cannot_be_cloned_from(self, client, monkeypatch):
+        """A video with no audio track is useless for cloning - say so."""
+        import app.services.media as media_mod
+
+        monkeypatch.setattr(
+            media_mod, "ffmpeg_status", lambda **_: ToolStatus(available=True, path="ffmpeg")
+        )
+        monkeypatch.setattr(media_mod, "ffprobe_path", lambda: "ffprobe")
+        monkeypatch.setattr(media_mod, "_ffprobe_duration_ms", lambda path: 8_000)
+        monkeypatch.setattr(media_mod, "_has_audio_stream", lambda path: False)
+
+        response = await upload(client, b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 128, "silent.mp4")
+        assert response.status_code == 200
+        warnings = " ".join(response.json()["warnings"])
+        assert "没有音轨" in warnings
+
     async def test_upload_uses_the_upload_limit_not_the_json_limit(self, client, settings):
         """A video larger than the JSON body limit must still be accepted.
 

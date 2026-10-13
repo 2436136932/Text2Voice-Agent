@@ -30,7 +30,12 @@ from app.core.config import settings
 from app.core.errors import AppError, ErrorCode
 from app.core.logging import get_logger
 from app.services.audio import estimate_duration_ms
-from app.services.tools import INSTALL_HINT, ffmpeg_status, ffprobe_path
+from app.services.tools import (
+    INSTALL_HINT,
+    ffmpeg_probe_media,
+    ffmpeg_status,
+    ffprobe_path,
+)
 
 logger = get_logger(__name__)
 
@@ -138,30 +143,31 @@ def probe_wav(data: bytes) -> dict[str, Any]:
 
 
 def _ffprobe_duration_ms(path: Path) -> int | None:
-    """Ask ffprobe for a duration (used for video containers)."""
+    """Read a container's duration, preferring ffprobe then ``ffmpeg -i``."""
     binary = ffprobe_path()
-    if not binary:
-        return None
-    try:
-        completed = subprocess.run(  # noqa: S603 - fixed argv
-            [
-                binary,
-                "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
-                str(path),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=20,
-            check=False,
-        )
-        raw = (completed.stdout or "").strip()
-        if raw:
-            return int(round(float(raw) * 1000))
-    except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        logger.warning("ffprobe failed for %s: %s", path.name, exc)
-    return None
+    if binary:
+        try:
+            completed = subprocess.run(  # noqa: S603 - fixed argv
+                [
+                    binary,
+                    "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    str(path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+            raw = (completed.stdout or "").strip()
+            if raw:
+                return int(round(float(raw) * 1000))
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            logger.warning("ffprobe failed for %s: %s", path.name, exc)
+    # Fallback: a portable ffmpeg build has no ffprobe, but `ffmpeg -i`
+    # prints the same duration on stderr.
+    return ffmpeg_probe_media(path).duration_ms
 
 
 class MediaStore:
@@ -192,6 +198,15 @@ class MediaStore:
 
     def _sidecar(self, media_id: str) -> Path:
         return self.root / f"{media_id}.json"
+
+    def update_sidecar(self, record: MediaRecord) -> None:
+        """Persist changed metadata (e.g. duration found later by ffprobe)."""
+        try:
+            self._sidecar(record.media_id).write_text(
+                json.dumps(asdict(record), ensure_ascii=False), encoding="utf-8"
+            )
+        except OSError as exc:  # pragma: no cover - disk issues
+            logger.warning("failed to update sidecar id=%s: %s", record.media_id, exc)
 
     # -- write / read -------------------------------------------------------
     def save(
@@ -354,6 +369,10 @@ def inspect_upload(data: bytes, filename: str) -> MediaRecord:
     sample_rate: int | None = None
     channels: int | None = None
     duration_ms: int | None = None
+    #: Video needs a holder before ffprobe can read it, so we cannot always
+    #: finish probing here; the caller passes the record back through
+    #: :func:`_probe_after_store` once the bytes are on disk.
+    probe_with_ffprobe = False
 
     if extension == "wav":
         probed = probe_wav(data)
@@ -363,22 +382,24 @@ def inspect_upload(data: bytes, filename: str) -> MediaRecord:
         if duration_ms is None:
             warnings.append("无法解析 WAV 头部信息，文件可能已损坏。")
     else:
+        # ``estimate_duration_ms`` parses MP3/OGG/FLAC frame headers directly.
         duration_ms = estimate_duration_ms(data, extension)
         if kind == "video":
             ffmpeg = ffmpeg_status()
             if not ffmpeg.available:
                 warnings.append(
                     "视频需要 ffmpeg 才能提取音轨与精确时长；当前环境未安装，"
-                    "仍然可以上传，但部分功能受限。"
+                    "仍然可以上传，但无法裁剪或用于声音克隆。"
+                    "安装后自动启用：winget install Gyan.FFmpeg"
                 )
-            elif duration_ms is None:
-                # We have ffmpeg but the bytes are not a parseable audio stream:
-                # write the file first so ffprobe can read it.
-                duration_ms = None
-        if duration_ms is None:
+            else:
+                # Container formats carry duration in metadata that only
+                # ffprobe can read, and it needs a real file on disk.
+                probe_with_ffprobe = True
+        if duration_ms is None and not probe_with_ffprobe:
             warnings.append("无法自动识别时长，如需精确裁剪请先转为 WAV。")
 
-    return media_store.save(
+    record = media_store.save(
         data=data,
         filename=filename or f"upload.{extension}",
         extension=extension,
@@ -389,6 +410,66 @@ def inspect_upload(data: bytes, filename: str) -> MediaRecord:
         channels=channels,
         warnings=warnings,
     )
+
+    if probe_with_ffprobe:
+        record = _enrich_video_duration(record)
+
+    return record
+
+
+def _enrich_video_duration(record: MediaRecord) -> MediaRecord:
+    """Fill in a video's duration/audio details via ffprobe.
+
+    Runs after the bytes are stored because ffprobe needs a real path. Knowing
+    the duration is what makes the trim slider usable for video, so it is worth
+    the extra subprocess.
+    """
+    path = media_store.path_for(record)
+    duration = _ffprobe_duration_ms(path)
+    if duration:
+        record.duration_ms = duration
+    else:
+        record.warnings.append("无法读取视频时长，裁剪功能可能不可用。")
+
+    # Confirm an audio track exists — a silent video cannot be cloned from.
+    if not _has_audio_stream(path):
+        record.warnings.append(
+            "该视频没有音轨，无法用于声音克隆。请换一个包含人声的视频。"
+        )
+    # A video with an audio track is trimmable once ffmpeg is present.
+    media_store.update_sidecar(record)
+    return record
+
+
+def _probe_audio_streams(path: Path) -> list[str]:
+    """Return the codec types present in a container (``['video','audio']``)."""
+    binary = ffprobe_path()
+    if not binary:
+        # Portable ffmpeg builds omit ffprobe; `ffmpeg -i` reports the same
+        # stream list on stderr, so a single-binary install still works.
+        return ffmpeg_probe_media(path).streams
+    try:
+        completed = subprocess.run(  # noqa: S603 - fixed argv
+            [
+                binary,
+                "-v", "error",
+                "-show_entries", "stream=codec_type",
+                "-of", "csv=p=0",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        return [line.strip() for line in (completed.stdout or "").splitlines() if line.strip()]
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning("ffprobe stream probe failed for %s: %s", path.name, exc)
+        return ffmpeg_probe_media(path).streams
+
+
+def _has_audio_stream(path: Path) -> bool:
+    return "audio" in _probe_audio_streams(path)
 
 
 # ---------------------------------------------------------------------------

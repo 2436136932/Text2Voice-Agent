@@ -143,6 +143,13 @@ class TestCloneCapabilities:
 # ---------------------------------------------------------------------------
 class TestCapabilitiesRoute:
     async def test_shape_and_ffmpeg_flag(self, client):
+        """The capability payload must be self-consistent either way.
+
+        Whether ffmpeg happens to be installed is an environment fact, not a
+        contract — this originally asserted `available is False` and broke the
+        moment ffmpeg was installed. Assert the invariant instead: the flag
+        matches the reported path/version, and the message explains the state.
+        """
         response = await client.get("/api/v1/capabilities")
         assert response.status_code == 200
         payload = response.json()
@@ -161,12 +168,16 @@ class TestCapabilitiesRoute:
             "video_extraction_available",
         }
 
-        # This environment has no ffmpeg (asserted by the task brief).
-        assert payload["ffmpeg"]["available"] is False
-        assert payload["ffmpeg"]["path"] is None
-        assert payload["ffmpeg"]["version"] is None
-        assert "未检测到 ffmpeg" in payload["ffmpeg"]["message"]
-        assert "winget install Gyan.FFmpeg" in payload["ffmpeg"]["message"]
+        ffmpeg = payload["ffmpeg"]
+        assert payload["upload"]["video_extraction_available"] is ffmpeg["available"]
+        if ffmpeg["available"]:
+            assert ffmpeg["path"], "an available ffmpeg must report its path"
+            assert "可用" in ffmpeg["message"]
+        else:
+            assert ffmpeg["path"] is None
+            assert ffmpeg["version"] is None
+            assert "未检测到 ffmpeg" in ffmpeg["message"]
+            assert "winget install Gyan.FFmpeg" in ffmpeg["message"]
 
     async def test_lists_clone_capable_providers(self, client):
         payload = (await client.get("/api/v1/capabilities")).json()
@@ -176,6 +187,9 @@ class TestCapabilitiesRoute:
         assert payload["voice_clone"]["note"]
 
     async def test_upload_section_matches_the_media_route(self, client):
+        """The advertised formats must match what the route actually accepts."""
+        from app.services.media import accepted_extensions
+
         payload = (await client.get("/api/v1/capabilities")).json()
         upload = payload["upload"]
         extensions = upload["accept"].split(",")
@@ -183,8 +197,9 @@ class TestCapabilitiesRoute:
         assert ".mp4" in extensions
         assert all(item.startswith(".") for item in extensions)
         assert upload["max_size_mb"] == 50
-        assert upload["trimmable_formats"] == ["wav"]
-        assert upload["video_extraction_available"] is False
+        # WAV is always trimmable; other formats depend on ffmpeg being present.
+        assert "wav" in upload["trimmable_formats"]
+        assert set(ext.lstrip(".") for ext in extensions) == set(accepted_extensions())
 
     async def test_refresh_parameter_is_accepted(self, client):
         assert (await client.get("/api/v1/capabilities?refresh=true")).status_code == 200
