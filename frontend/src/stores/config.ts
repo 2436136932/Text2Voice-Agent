@@ -235,8 +235,9 @@ export const useConfigStore = defineStore('config', {
     /**
      * Whether every required field for the *current mode* is present.
      *
-     * `clone` additionally needs a reference clip; `text2audio` does not need
-     * an LLM at all.
+     * `text2audio` and `clone` voice the typed text verbatim (no LLM), so they
+     * do not need LLM fields; only the LLM-assisted `tts` mode does.
+     * `clone` additionally needs a reference clip.
      */
     canGenerate(state): boolean {
       if (state.text.trim().length === 0) return false
@@ -244,8 +245,9 @@ export const useConfigStore = defineStore('config', {
       if (state.ttsProviderId.length === 0) return false
       if (state.ttsVoice.trim().length === 0) return false
 
-      // LLM is required unless we are only voicing the text verbatim.
-      const needsLLM = state.mode !== 'text2audio'
+      // LLM is required only when it rewrites the text first. Clone mode reads
+      // the typed text as-is in the cloned voice, like the vendor example.
+      const needsLLM = state.mode === 'tts'
       if (needsLLM) {
         if (state.llmProviderId.length === 0) return false
         if (state.llmApiKey.trim().length === 0) return false
@@ -265,7 +267,7 @@ export const useConfigStore = defineStore('config', {
       if (state.text.length > MAX_TEXT_LENGTH) reasons.push(`文本长度不能超过 ${MAX_TEXT_LENGTH} 个字符`)
       if (!state.providersLoaded) reasons.push('服务商列表尚未加载完成')
 
-      const needsLLM = state.mode !== 'text2audio'
+      const needsLLM = state.mode === 'tts'
       if (needsLLM) {
         if (state.llmProviderId.length === 0) reasons.push('请前往「系统设置」选择大模型服务商')
         if (state.llmApiKey.trim().length === 0) reasons.push('请前往「系统设置」填写大模型 API Key')
@@ -381,10 +383,13 @@ export const useConfigStore = defineStore('config', {
         ...overrides,
       }
 
-      // `clone` forwards the reference clip; `text2audio` skips the LLM by
-      // asking the backend to voice the typed text verbatim.
+      // `clone` forwards the reference clip AND skips the LLM: cloning means
+      // "speak MY text in the cloned voice", so the typed text goes to the
+      // synthesizer verbatim (matches the vendor's voiceclone example, where
+      // the assistant message IS the text to speak).
       if (this.mode === 'clone' && this.referenceMediaId) {
         options.reference_media_id = this.referenceMediaId
+        options.reuse_reply_text = this.text
       }
       if (this.mode === 'text2audio') {
         options.reuse_reply_text = this.text

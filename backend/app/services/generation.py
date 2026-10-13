@@ -306,6 +306,20 @@ class GenerationService:
                 len(reference_bytes),
             )
 
+            # A reference clip makes the request a *cloning* request. If the
+            # configured model cannot consume one (e.g. the plain MiMo TTS
+            # model), the adapter would silently drop the clip and speak in a
+            # preset voice — the worst failure mode, because nothing errors.
+            # Upgrade to the provider's clone model instead, so "upload a
+            # reference + hit generate" always clones.
+            clone_model = getattr(adapter, "clone_model", "")
+            if clone_model and request.tts.model != clone_model:
+                logger.info(
+                    "upgrading tts model for reference audio provider=%s from=%s to=%s",
+                    adapter.id, request.tts.model, clone_model,
+                )
+                request.tts.model = clone_model
+
         tts_request = TTSRequest(
             text=reply_text,
             api_key=api_key,

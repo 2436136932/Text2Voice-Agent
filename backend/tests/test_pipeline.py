@@ -192,6 +192,51 @@ class TestGenerationServiceDegradation:
         assert response.llm.finish_reason == "reused"
         assert response.llm.latency_ms == 0
 
+    async def test_reference_audio_without_capability_raises_friendly_error(self, session):
+        """Adapters that cannot clone must refuse loudly, not ignore the clip.
+
+        The mock adapter supports neither reference audio nor cloning, so
+        attaching a clip must raise the actionable capability error instead of
+        silently synthesizing in a preset voice.
+        """
+        import pytest
+
+        from app.core.errors import AppError, ErrorCode
+        from app.services.media import media_store
+
+        saved = media_store.save(
+            data=b"fake-bytes",
+            filename="ref.wav",
+            extension="wav",
+            kind="audio",
+            content_type="audio/wav",
+            duration_ms=3000,
+            sample_rate=24000,
+            channels=1,
+        )
+
+        request = GenerateRequest(
+            text="原始输入",
+            llm={"provider": "mock"},
+            tts={"provider": "mock", "model": "mock-tts-v1", "voice": "mock-neutral", "format": "wav"},
+            options={
+                "auto_save": False,
+                "reuse_reply_text": "直接朗读这段话",
+                "reference_media_id": saved.media_id,
+            },
+        )
+        with pytest.raises(AppError) as excinfo:
+            await GenerationService().generate(session, request)
+        assert excinfo.value.code is ErrorCode.TTS_REFERENCE_UNSUPPORTED
+
+    def test_mimo_declares_clone_model_for_auto_upgrade(self):
+        """MiMo must publish the model the orchestrator upgrades to."""
+        from app.adapters.registry import registry
+
+        adapter = registry.tts("mimo")
+        assert adapter.clone_model == "mimo-v2.5-tts-voiceclone"
+        assert adapter.supports_reference_audio is True
+
     async def test_record_is_persisted_with_metadata(self, session):
         request = GenerateRequest(
             text="持久化测试",

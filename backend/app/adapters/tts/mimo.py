@@ -101,6 +101,10 @@ class MiMoTTSAdapter(TTSAdapter):
     #: clone flow, which registers a voice id instead).
     supports_voice_clone = True
     supports_reference_audio = True
+    #: Attaching a reference clip to the plain TTS model makes the vendor call
+    #: ignore the clip entirely, so the orchestration layer auto-switches to
+    #: this model whenever a clip is present.
+    clone_model = MODEL_VOICE_CLONE
     clone_models = (
         {"id": MODEL_VOICE_CLONE, "name": "mimo-v2.5-tts-voiceclone (音色克隆)"},
     )

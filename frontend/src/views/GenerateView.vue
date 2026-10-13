@@ -131,7 +131,7 @@ const blockingReasons = computed<string[]>(() => {
 const canSubmit = computed(() => configStore.canGenerate && !cloneBlockReason.value && !busy.value)
 
 /** 直接配音 skips the model, so its parameters are irrelevant and hidden. */
-const needsLlm = computed<boolean>(() => configStore.mode !== 'text2audio')
+const needsLlm = computed<boolean>(() => configStore.mode === 'tts')
 
 /* ------------------------------- actions ------------------------------- */
 

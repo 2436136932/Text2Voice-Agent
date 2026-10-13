@@ -649,6 +649,11 @@ class TTSAdapter(BaseAdapter):
     #: True when a reference clip can be attached to a synthesis call instead of
     #: being cloned up front (no vendor clone API involved).
     supports_reference_audio: bool = False
+    #: Model id to switch to when a reference clip is attached but the
+    #: configured model cannot consume one. Empty = no auto-switch. Without
+    #: this, attaching a clip to a plain TTS model makes the adapter silently
+    #: ignore the clip and speak in a preset voice.
+    clone_model: str = ""
     content_type_map: dict[str, str] = {
         "mp3": "audio/mpeg",
         "wav": "audio/wav",
