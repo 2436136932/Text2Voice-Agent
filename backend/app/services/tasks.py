@@ -38,7 +38,7 @@ from app.core.config import settings
 from app.core.errors import AppError, ErrorCode
 from app.core.logging import get_logger
 from app.db.base import session_scope
-from app.db.models import TaskModel
+from app.db.models import TaskModel, iso_utc
 from app.schemas.generation import GenerateRequest
 from app.services.generation import generation_service
 from app.services.metrics import metrics
@@ -99,6 +99,8 @@ class TaskState:
         return max(0, int((end - start).total_seconds() * 1000))
 
     def to_dict(self) -> dict[str, Any]:
+        # Timestamps are marked UTC so the browser renders them in local time
+        # instead of misreading naive UTC values as local.
         return {
             "task_id": self.task_id,
             "status": self.status,
@@ -106,9 +108,9 @@ class TaskState:
             "progress": self.progress,
             "message": self.message,
             "record_id": self.record_id,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "started_at": self.started_at.isoformat() if self.started_at else None,
-            "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+            "created_at": iso_utc(self.created_at),
+            "started_at": iso_utc(self.started_at),
+            "finished_at": iso_utc(self.finished_at),
             "elapsed_ms": self.elapsed_ms,
             "error": self.error,
         }

@@ -375,6 +375,7 @@ class GenerationService:
                 latency_ms=result.latency_ms,
                 format=result.audio_format,
                 bytes=len(result.audio),
+                used_reference_audio=bool(extra.get("reference_audio_bytes")),
             ),
             result.audio_format,
             False,

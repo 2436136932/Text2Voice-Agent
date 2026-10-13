@@ -19,10 +19,20 @@ aspirational.
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
+
+from app.schemas.datetime_utils import AwareUTC
 
 from app.core.config import settings
 
@@ -263,6 +273,10 @@ class TTSResultSchema(BaseModel):
     latency_ms: int
     format: str = "mp3"
     bytes: int = 0
+    #: True when this synthesis actually used a reference clip (cloning). The
+    #: UI shows "参考音频" instead of the (unused) preset voice name, which
+    #: otherwise misleads users into thinking the vendor voice was used.
+    used_reference_audio: bool = False
 
 
 class GenerateResponse(BaseModel):
@@ -281,7 +295,7 @@ class GenerateResponse(BaseModel):
     llm: LLMResultSchema
     tts: TTSResultSchema
     total_latency_ms: int = 0
-    created_at: datetime
+    created_at: AwareUTC
 
 
 class TaskSubmitResponse(BaseModel):
@@ -299,9 +313,9 @@ class TaskStatusResponse(BaseModel):
     progress: int = Field(ge=0, le=100)
     message: str = ""
     record_id: int | None = None
-    created_at: datetime | None = None
-    started_at: datetime | None = None
-    finished_at: datetime | None = None
+    created_at: AwareUTC | None = None
+    started_at: AwareUTC | None = None
+    finished_at: AwareUTC | None = None
     elapsed_ms: int | None = None
     error: dict[str, Any] | None = None
 
@@ -330,7 +344,7 @@ class HistoryItem(BaseModel):
     degraded_reason: str | None = None
     error_code: str | None = None
     error_message: str | None = None
-    created_at: datetime | None = None
+    created_at: AwareUTC | None = None
     audio_url: str | None = None
 
 
@@ -372,7 +386,7 @@ class SettingsSchema(BaseModel):
     auto_save_history: bool = True
     auto_save_credentials: bool = True
     request_timeout_seconds: int = Field(default=120, ge=5, le=600)
-    updated_at: datetime | None = None
+    updated_at: AwareUTC | None = None
 
 
 class SettingsUpdateRequest(BaseSchema):
@@ -393,7 +407,7 @@ class HealthResponse(BaseModel):
     environment: str = "development"
     database: str = "ok"
     providers: dict[str, int] = Field(default_factory=dict)
-    timestamp: datetime | None = None
+    timestamp: AwareUTC | None = None
 
 
 class ErrorResponse(BaseModel):
@@ -528,7 +542,7 @@ class ClonedVoiceResponse(BaseModel):
     provider: str
     name: str
     model: str = ""
-    created_at: datetime | None = None
+    created_at: AwareUTC | None = None
     duration_ms: int | None = None
 
 

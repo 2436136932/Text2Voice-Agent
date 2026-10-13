@@ -388,6 +388,8 @@ export interface GenerateTTSInfo {
   provider: string
   voice: string
   latency_ms: number
+  /** True when the synthesis actually used the uploaded reference clip. */
+  used_reference_audio?: boolean
 }
 
 /** `POST /generate` and `GET /tasks/{task_id}/result`. */

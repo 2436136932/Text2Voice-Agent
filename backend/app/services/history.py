@@ -206,7 +206,9 @@ class HistoryService:
             writer.writerow(
                 [
                     row.id,
-                    row.created_at.isoformat() if row.created_at else "",
+                    row.created_at.astimezone(timezone.utc).isoformat()
+                    if row.created_at
+                    else "",
                     row.status,
                     row.llm_provider,
                     row.llm_model,

@@ -201,7 +201,10 @@ async function handleCopyAll(): Promise<void> {
           {{ result.tts?.provider ?? '—' }}
         </el-descriptions-item>
         <el-descriptions-item label="发音人">
-          {{ result.tts?.voice ?? '—' }}
+          <template v-if="result.tts?.used_reference_audio">
+            <el-tag type="warning" size="small" effect="plain">参考音频克隆</el-tag>
+          </template>
+          <template v-else>{{ result.tts?.voice ?? '—' }}</template>
         </el-descriptions-item>
         <el-descriptions-item label="LLM 耗时">
           {{ formatSeconds(result.llm?.latency_ms) }}
