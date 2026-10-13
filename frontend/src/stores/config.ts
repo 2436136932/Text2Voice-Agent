@@ -358,16 +358,13 @@ export const useConfigStore = defineStore('config', {
     },
 
     /**
-     * Apply server defaults without clobbering what the user already typed:
-     * only empty selections and untouched keys are filled in.
+     * Pull the history/credential preference out of server settings.
+     *
+     * Generation parameters are no longer seeded from the server: they live on
+     * the generate page and are remembered in localStorage instead, so there is
+     * no second copy to fall out of sync.
      */
-    applyDefaults(settings: ServerSettings): void {
-      if (this.llmProviderId.length === 0) this.llmProviderId = settings.default_llm_provider
-      if (this.llmModel.trim().length === 0) this.llmModel = settings.default_llm_model
-      if (this.ttsProviderId.length === 0) this.ttsProviderId = settings.default_tts_provider
-      if (this.ttsVoice.trim().length === 0) this.ttsVoice = settings.default_tts_voice
-      if (this.speed === 1.0 && Number.isFinite(settings.default_speed)) this.speed = settings.default_speed
-      if (this.systemPrompt.trim().length === 0) this.systemPrompt = settings.default_system_prompt
+    syncFromSettings(settings: ServerSettings): void {
       this.autoSave = settings.auto_save_history
     },
 

@@ -22,20 +22,6 @@ export interface SettingsState {
   saving: boolean
   loaded: boolean
   error: string | null
-  /**
-   * Defaults staged from the provider panels ("设为默认").
-   *
-   * Kept separate from `server` so the user can stage several changes and then
-   * commit them with a single 保存 — nothing is sent until they do.
-   */
-  pendingDefaults: PendingDefaults
-}
-
-export interface PendingDefaults {
-  llmProvider: string | null
-  llmModel: string | null
-  ttsProvider: string | null
-  ttsVoice: string | null
 }
 
 export const useSettingsStore = defineStore('settings', {
@@ -49,12 +35,6 @@ export const useSettingsStore = defineStore('settings', {
     saving: false,
     loaded: false,
     error: null,
-    pendingDefaults: {
-      llmProvider: null,
-      llmModel: null,
-      ttsProvider: null,
-      ttsVoice: null,
-    },
   }),
 
   getters: {
@@ -134,31 +114,6 @@ export const useSettingsStore = defineStore('settings', {
     /** Toggle the local credential-persistence mirror (does not touch the API). */
     setAutoSaveCredentials(value: boolean): void {
       this.autoSaveCredentials = value
-    },
-
-    /**
-     * Merge the staged defaults into a `PUT /settings` patch.
-     *
-     * Returns only the fields the user actually staged, so an unrelated save
-     * never overwrites a default they did not touch.
-     */
-    defaultsPatch(): UpdateSettingsRequest {
-      const patch: UpdateSettingsRequest = {}
-      if (this.pendingDefaults.llmProvider) patch.default_llm_provider = this.pendingDefaults.llmProvider
-      if (this.pendingDefaults.llmModel) patch.default_llm_model = this.pendingDefaults.llmModel
-      if (this.pendingDefaults.ttsProvider) patch.default_tts_provider = this.pendingDefaults.ttsProvider
-      if (this.pendingDefaults.ttsVoice) patch.default_tts_voice = this.pendingDefaults.ttsVoice
-      return patch
-    },
-
-    /** Drop every staged default (after a successful save or a reset). */
-    clearPendingDefaults(): void {
-      this.pendingDefaults = {
-        llmProvider: null,
-        llmModel: null,
-        ttsProvider: null,
-        ttsVoice: null,
-      }
     },
   },
 

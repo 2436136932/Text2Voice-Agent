@@ -556,12 +556,31 @@ class TestSettingsRoutes:
         response = await client.get("/api/v1/settings")
         assert response.status_code == 200
         payload = response.json()
-        assert payload["default_llm_provider"]
-        assert payload["default_tts_provider"]
         # Credentials are remembered by default so a key typed once survives a
         # reload; the switch still allows opting out on a shared machine.
         assert payload["auto_save_credentials"] is True
         assert payload["request_timeout_seconds"] == 120
+
+    async def test_settings_hold_no_generation_parameters(self, client):
+        """Generation params belong to the generate page, not the server.
+
+        They were once stored here as 「默认生成参数」, which meant configuring
+        the same model/voice twice and risking the two copies disagreeing. The
+        endpoint must now reject them so a stale client cannot reintroduce that.
+        """
+        payload = (await client.get("/api/v1/settings")).json()
+        for field in (
+            "default_llm_provider",
+            "default_llm_model",
+            "default_tts_provider",
+            "default_tts_voice",
+            "default_speed",
+            "default_system_prompt",
+        ):
+            assert field not in payload, f"{field} should no longer be stored"
+
+        rejected = await client.put("/api/v1/settings", json={"default_tts_voice": "nova"})
+        assert rejected.status_code == 422
 
     async def test_credentials_can_be_switched_off(self, client):
         """The opt-out must still work for shared machines.
@@ -578,16 +597,15 @@ class TestSettingsRoutes:
     async def test_partial_update(self, client):
         response = await client.put(
             "/api/v1/settings",
-            json={"default_tts_voice": "nova", "default_speed": 1.35, "auto_save_history": False},
+            json={"auto_save_history": False, "request_timeout_seconds": 180},
         )
         assert response.status_code == 200
         payload = response.json()
-        assert payload["default_tts_voice"] == "nova"
-        assert payload["default_speed"] == 1.35
         assert payload["auto_save_history"] is False
+        assert payload["request_timeout_seconds"] == 180
 
         reloaded = (await client.get("/api/v1/settings")).json()
-        assert reloaded["default_tts_voice"] == "nova"
+        assert reloaded["request_timeout_seconds"] == 180
 
     async def test_settings_never_contain_credentials(self, client):
         text = (await client.get("/api/v1/settings")).text
@@ -599,8 +617,8 @@ class TestSettingsRoutes:
         assert response.status_code == 422
         assert response.json()["code"] == "VALIDATION_ERROR"
 
-    async def test_out_of_range_speed_is_rejected(self, client):
-        response = await client.put("/api/v1/settings", json={"default_speed": 99})
+    async def test_out_of_range_timeout_is_rejected(self, client):
+        response = await client.put("/api/v1/settings", json={"request_timeout_seconds": 99999})
         assert response.status_code == 422
 
 

@@ -361,34 +361,26 @@ class HistoryDeleteResponse(BaseModel):
 # Settings
 # ---------------------------------------------------------------------------
 class SettingsSchema(BaseModel):
-    default_llm_provider: str = "openai"
-    default_llm_model: str = "gpt-4o-mini"
-    default_tts_provider: str = "openai"
-    default_tts_voice: str = "alloy"
-    default_speed: float = Field(default=1.0, ge=0.1, le=4.0)
-    default_system_prompt: str = ""
+    """System-level preferences only.
+
+    Generation parameters (provider, model, voice, speed, system prompt) are
+    deliberately absent: they belong to the generate page and are remembered in
+    the browser, so storing a second copy here would only create a way for the
+    two to disagree.
+    """
+
     auto_save_history: bool = True
     auto_save_credentials: bool = True
     request_timeout_seconds: int = Field(default=120, ge=5, le=600)
-    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
-    max_tokens: int = Field(default=1024, ge=1, le=32768)
     updated_at: datetime | None = None
 
 
 class SettingsUpdateRequest(BaseSchema):
     """Partial update; every field is optional."""
 
-    default_llm_provider: str | None = Field(default=None, max_length=32)
-    default_llm_model: str | None = Field(default=None, max_length=128)
-    default_tts_provider: str | None = Field(default=None, max_length=32)
-    default_tts_voice: str | None = Field(default=None, max_length=128)
-    default_speed: float | None = Field(default=None, ge=0.1, le=4.0)
-    default_system_prompt: str | None = Field(default=None, max_length=4000)
     auto_save_history: bool | None = None
     auto_save_credentials: bool | None = None
     request_timeout_seconds: int | None = Field(default=None, ge=5, le=600)
-    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
-    max_tokens: int | None = Field(default=None, ge=1, le=32768)
 
 
 # ---------------------------------------------------------------------------

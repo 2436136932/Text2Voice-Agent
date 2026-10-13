@@ -19,7 +19,6 @@ import {
   Link,
   Microphone,
   QuestionFilled,
-  Star,
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { fetchDebugCapture, fetchModels, probePaths, validateProvider } from '@/api'
@@ -419,18 +418,6 @@ function reportError(error: unknown, fallback: string): void {
     ElMessage.error(fallback)
   }
 }
-
-/** Mark the current selection as the default used by the generate page. */
-function setAsDefault(): void {
-  if (isLLM.value) {
-    settingsStore.pendingDefaults.llmProvider = providerId.value
-    settingsStore.pendingDefaults.llmModel = model.value
-  } else {
-    settingsStore.pendingDefaults.ttsProvider = providerId.value
-    settingsStore.pendingDefaults.ttsVoice = voice.value
-  }
-  ElMessage.success('已设为默认，保存设置后生效')
-}
 </script>
 
 <template>
@@ -770,30 +757,9 @@ function setAsDefault(): void {
             </div>
           </el-form-item>
 
-          <el-form-item v-if="configStore.temperature !== undefined && isLLM" label="温度 (temperature)">
-            <el-slider v-model="configStore.temperature" :min="0" :max="2" :step="0.05" show-input />
-          </el-form-item>
-
-          <el-form-item v-if="isLLM" label="最大回复长度 (max tokens)">
-            <el-input-number
-              v-model="configStore.maxTokens"
-              :min="1"
-              :max="32768"
-              :step="128"
-              controls-position="right"
-            />
-          </el-form-item>
-
-          <el-form-item v-if="isLLM" label="系统提示词">
-            <el-input
-              v-model="configStore.systemPrompt"
-              type="textarea"
-              :rows="3"
-              maxlength="4000"
-              show-word-limit
-              placeholder="告诉大模型应该如何回答，例如：回答简洁、口语化，适合朗读。"
-            />
-          </el-form-item>
+          <!--温度、max tokens 与系统提示词 are per-generation settings and now
+               live on the generate page; keeping a second copy here is what made
+               the same value editable in two places. -->
 
           <el-form-item v-if="!isLLM" label="支持的音频格式">
             <div class="provider-panel__tags">
@@ -827,7 +793,6 @@ function setAsDefault(): void {
             </el-button>
           </span>
         </el-tooltip>
-        <el-button :icon="Star" @click="setAsDefault">设为默认</el-button>
       </div>
     </el-form>
   </el-card>

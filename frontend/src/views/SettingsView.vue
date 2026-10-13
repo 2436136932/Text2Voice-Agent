@@ -1,12 +1,16 @@
 <script setup lang="ts">
 /**
- * `/settings` — the single place where everything is configured.
+ * `/settings` — system-level configuration only.
  *
- * Page order mirrors the user's mental model:
- *   1. 服务商与密钥  — LLM + TTS provider, key, model, voice, clone manager
- *   2. 默认参数      — the defaults the generate page starts from
- *   3. 请求与保存    — history / credential persistence / timeout
- *   4. 本机凭据      — what is currently held in this browser, and how to wipe it
+ * Sections:
+ *   1. 服务商与密钥  — who to call, and with which key (plus voice cloning)
+ *   2. 请求与保存    — history persistence, credential persistence, timeout
+ *   3. 本机凭据      — what this browser holds, and how to wipe it
+ *
+ * Per-generation parameters (speed, format, system prompt, model, voice) live
+ * on the generate page instead. They used to be duplicated here as 「默认生成
+ * 参数」, which meant configuring the same model/voice twice and risking the two
+ * copies disagreeing.
  *
  * Credentials are never sent to `PUT /settings` (the backend schema has no
  * credential field at all); they travel only to the endpoints that call a
@@ -29,12 +33,6 @@ const configStore = useConfigStore()
 /* --------------------------------- form ---------------------------------- */
 
 interface SettingsForm {
-  default_llm_provider: string
-  default_llm_model: string
-  default_tts_provider: string
-  default_tts_voice: string
-  default_speed: number
-  default_system_prompt: string
   auto_save_history: boolean
   auto_save_credentials: boolean
   request_timeout_seconds: number
@@ -42,12 +40,6 @@ interface SettingsForm {
 
 function emptyForm(): SettingsForm {
   return {
-    default_llm_provider: '',
-    default_llm_model: '',
-    default_tts_provider: '',
-    default_tts_voice: '',
-    default_speed: 1.0,
-    default_system_prompt: '你是一个乐于助人的中文助手，回答简洁、口语化，适合朗读。',
     auto_save_history: true,
     auto_save_credentials: true,
     request_timeout_seconds: 120,
@@ -61,12 +53,6 @@ const saving = ref(false)
 
 function syncFormFromStore(): void {
   const settings = settingsStore.effective
-  form.default_llm_provider = settings.default_llm_provider
-  form.default_llm_model = settings.default_llm_model
-  form.default_tts_provider = settings.default_tts_provider
-  form.default_tts_voice = settings.default_tts_voice
-  form.default_speed = settings.default_speed
-  form.default_system_prompt = settings.default_system_prompt
   form.auto_save_history = settings.auto_save_history
   form.auto_save_credentials = settings.auto_save_credentials
   form.request_timeout_seconds = settings.request_timeout_seconds
@@ -74,17 +60,9 @@ function syncFormFromStore(): void {
 
 function buildPatch(): UpdateSettingsRequest {
   return {
-    default_llm_provider: form.default_llm_provider,
-    default_llm_model: form.default_llm_model,
-    default_tts_provider: form.default_tts_provider,
-    default_tts_voice: form.default_tts_voice,
-    default_speed: form.default_speed,
-    default_system_prompt: form.default_system_prompt,
     auto_save_history: form.auto_save_history,
     auto_save_credentials: form.auto_save_credentials,
     request_timeout_seconds: form.request_timeout_seconds,
-    // Staged from the provider panels via "设为默认".
-    ...settingsStore.defaultsPatch(),
   }
 }
 
@@ -123,8 +101,6 @@ async function handleSave(): Promise<void> {
     if (updated.auto_save_credentials) configStore.persistCredentials()
     else configStore.clearCredentials()
 
-    settingsStore.clearPendingDefaults()
-    configStore.applyDefaults(updated)
     syncFormFromStore()
     hasCachedCredentials.value = configStore.hasCachedCredentials()
     ElMessage.success('设置已保存')
@@ -144,7 +120,6 @@ async function handleReset(): Promise<void> {
     return
   }
   loading.value = true
-  settingsStore.clearPendingDefaults()
   const settings = await settingsStore.load()
   if (settings) syncFormFromStore()
   loading.value = false
@@ -185,48 +160,6 @@ function handleAutoSaveChange(value: boolean): void {
     hasCachedCredentials.value = false
   }
 }
-
-/* ------------------------------- selectors ------------------------------- */
-
-const llmProviders = computed(() => configStore.llmProviders)
-const ttsProviders = computed(() => configStore.ttsProviders)
-
-const llmModels = computed(() => {
-  const provider = llmProviders.value.find((item) => item.id === configStore.llmProviderId)
-  return provider?.models ?? []
-})
-
-const ttsVoices = computed(() => {
-  const provider = ttsProviders.value.find((item) => item.id === configStore.ttsProviderId)
-  return provider?.voices ?? []
-})
-
-const ttsSpeedRange = computed<{ min: number; max: number }>(() => {
-  const provider = ttsProviders.value.find((item) => item.id === configStore.ttsProviderId)
-  return { min: provider?.speed_min ?? 0.25, max: provider?.speed_max ?? 4.0 }
-})
-
-const speedLabel = computed<string>(() => `${form.default_speed.toFixed(2)}x`)
-
-/** Push the currently selected provider/model/voice into the defaults form. */
-function useCurrentAsDefaults(): void {
-  form.default_llm_provider = configStore.llmProviderId
-  form.default_llm_model = configStore.llmModel
-  form.default_tts_provider = configStore.ttsProviderId
-  form.default_tts_voice = configStore.ttsVoice
-  form.default_system_prompt = configStore.systemPrompt
-  ElMessage.success('已同步当前配置到默认参数，别忘了点「保存设置」')
-}
-
-function handleLLMProviderChange(value: string): void {
-  const provider = llmProviders.value.find((item) => item.id === value)
-  if (provider) form.default_llm_model = provider.default_model
-}
-
-function handleTTSProviderChange(value: string): void {
-  const provider = ttsProviders.value.find((item) => item.id === value)
-  if (provider) form.default_tts_voice = provider.default_voice
-}
 </script>
 
 <template>
@@ -234,7 +167,7 @@ function handleTTSProviderChange(value: string): void {
     <div class="t2v-page__title">
       <h2>系统设置</h2>
       <span class="t2v-page__subtitle">
-        服务商、密钥、模型与音色都在这里配置；「语音生成」页只负责输入文本和点击生成。
+        这里配置服务商、密钥与运行行为；语速、格式、提示词等每次生成要调的参数在「语音生成」页。
       </span>
     </div>
 
@@ -268,96 +201,7 @@ function handleTTSProviderChange(value: string): void {
       <VoiceClonePanel />
     </el-card>
 
-    <!-- ================= 2. 默认参数 ================= -->
-    <el-card v-loading="loading" shadow="never" class="settings-view__section">
-      <template #header>
-        <div class="settings-view__header">
-          <span>默认生成参数</span>
-          <div class="settings-view__header-right">
-            <span v-if="settingsStore.effective.updated_at" class="t2v-muted settings-view__updated">
-              最后更新：{{ settingsStore.effective.updated_at }}
-            </span>
-            <el-button link size="small" @click="useCurrentAsDefaults">用当前配置填充</el-button>
-          </div>
-        </div>
-      </template>
-
-      <el-form label-position="top" @submit.prevent>
-        <div class="t2v-grid t2v-grid--2">
-          <el-form-item label="默认大模型服务商">
-            <el-select
-              v-model="form.default_llm_provider"
-              class="settings-view__control"
-              placeholder="请选择服务商"
-              @change="handleLLMProviderChange"
-            >
-              <el-option v-for="item in llmProviders" :key="item.id" :label="item.name" :value="item.id" />
-            </el-select>
-          </el-form-item>
-
-          <el-form-item label="默认大模型">
-            <el-select
-              v-model="form.default_llm_model"
-              class="settings-view__control"
-              placeholder="请选择或输入模型"
-              filterable
-              allow-create
-              default-first-option
-              :reserve-keyword="false"
-            >
-              <el-option v-for="item in llmModels" :key="item.id" :label="item.name" :value="item.id" />
-            </el-select>
-          </el-form-item>
-
-          <el-form-item label="默认语音合成服务商">
-            <el-select
-              v-model="form.default_tts_provider"
-              class="settings-view__control"
-              placeholder="请选择服务商"
-              @change="handleTTSProviderChange"
-            >
-              <el-option v-for="item in ttsProviders" :key="item.id" :label="item.name" :value="item.id" />
-            </el-select>
-          </el-form-item>
-
-          <el-form-item label="默认音色">
-            <el-select
-              v-model="form.default_tts_voice"
-              class="settings-view__control"
-              placeholder="请选择音色"
-              filterable
-            >
-              <el-option v-for="item in ttsVoices" :key="item.id" :label="item.name" :value="item.id" />
-            </el-select>
-          </el-form-item>
-        </div>
-
-        <el-form-item :label="`默认语速（${speedLabel}）`">
-          <el-slider
-            v-model="form.default_speed"
-            :min="ttsSpeedRange.min"
-            :max="ttsSpeedRange.max"
-            :step="0.05"
-            show-input
-            :show-input-controls="false"
-            class="settings-view__slider"
-          />
-        </el-form-item>
-
-        <el-form-item label="默认系统提示词">
-          <el-input
-            v-model="form.default_system_prompt"
-            type="textarea"
-            :rows="3"
-            maxlength="4000"
-            show-word-limit
-            placeholder="告诉大模型应该如何回答，例如：回答简洁、口语化，适合朗读。"
-          />
-        </el-form-item>
-      </el-form>
-    </el-card>
-
-    <!-- ================= 3. 请求与保存 ================= -->
+    <!-- ================= 2. 请求与保存 ================= -->
     <el-card shadow="never" class="settings-view__section">
       <template #header>
         <span>请求与保存</span>

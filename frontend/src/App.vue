@@ -22,10 +22,15 @@ onMounted(async () => {
   // exactly what `autoSaveCredentials` was meant to provide.
   if (settingsStore.autoSaveCredentials) configStore.restoreCredentials()
 
-  // Server settings: they seed the generation defaults and the timeout.
+  // Server settings still supply the request timeout and the history/credential
+  // preferences. They no longer carry generation defaults: those live on the
+  // generate page, so restoreCredentials() is the only thing that seeds the
+  // provider/model/voice selection.
   const settings = await settingsStore.load()
   if (settings) {
-    configStore.applyDefaults(settings)
+    // History auto-save is the one generation-affecting preference that still
+    // belongs to the server.
+    configStore.syncFromSettings(settings)
     // The server value is authoritative once known; re-restore if the user has
     // saving enabled but localStorage had not told us yet.
     if (settingsStore.autoSaveCredentials) configStore.restoreCredentials()
@@ -36,8 +41,7 @@ onMounted(async () => {
     ElMessage.error('无法加载服务商列表，请确认后端服务已启动。')
     return
   }
-  // Re-apply defaults now that the catalogue exists (guards against stale ids).
-  if (settings) configStore.applyDefaults(settings)
+  // Fill any selection that is still empty (first run, or a stale provider id).
   configStore.ensureSelections()
 })
 </script>

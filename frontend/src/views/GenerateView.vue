@@ -130,6 +130,9 @@ const blockingReasons = computed<string[]>(() => {
 
 const canSubmit = computed(() => configStore.canGenerate && !cloneBlockReason.value && !busy.value)
 
+/** 直接配音 skips the model, so its parameters are irrelevant and hidden. */
+const needsLlm = computed<boolean>(() => configStore.mode !== 'text2audio')
+
 /* ------------------------------- actions ------------------------------- */
 
 function stopTimers(): void {
@@ -400,6 +403,49 @@ const referenceHint = computed<string>(() => {
                 </el-radio-button>
               </el-radio-group>
             </el-form-item>
+
+            <!-- LLM behaviour lives here, not on the settings page: it shapes a
+                 single reply rather than the system as a whole. -->
+            <template v-if="needsLlm">
+              <el-form-item :label="`温度（${configStore.temperature.toFixed(2)}）`">
+                <el-slider
+                  v-model="configStore.temperature"
+                  :min="0"
+                  :max="2"
+                  :step="0.05"
+                  show-input
+                  :show-input-controls="false"
+                />
+                <div class="params-card__hint">
+                  越低越稳定、越高越有创意。朗读场景建议 0.3 – 0.7。
+                </div>
+              </el-form-item>
+
+              <el-form-item label="最大回复长度 (max tokens)">
+                <el-input-number
+                  v-model="configStore.maxTokens"
+                  :min="1"
+                  :max="32768"
+                  :step="128"
+                  controls-position="right"
+                />
+                <div class="params-card__hint">
+                  语音合成的时长与它成正比，按需调整。
+                </div>
+              </el-form-item>
+
+              <el-form-item label="系统提示词">
+                <el-input
+                  v-model="configStore.systemPrompt"
+                  type="textarea"
+                  :rows="3"
+                  maxlength="4000"
+                  show-word-limit
+                  placeholder="告诉大模型应该如何回答，例如：回答简洁、口语化，适合朗读。"
+                />
+              </el-form-item>
+            </template>
+
             <el-form-item>
               <el-checkbox v-model="configStore.autoSave">保存到历史记录</el-checkbox>
             </el-form-item>
@@ -552,6 +598,13 @@ const referenceHint = computed<string>(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+.params-card__hint {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--el-text-color-secondary);
 }
 
 .submit-card__wrap {

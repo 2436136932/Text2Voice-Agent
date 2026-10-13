@@ -267,11 +267,13 @@ class TestSettingsPersistence:
         assert values["request_timeout_seconds"] == 120
 
     async def test_unknown_keys_are_merged_not_lost(self, session):
+        """A key written by a future version must survive a settings load."""
         await SettingModel.save(session, {"custom_future_key": "kept"})
         await session.commit()
         values = await SettingModel.load(session)
         assert values["custom_future_key"] == "kept"
-        assert values["default_tts_provider"] == "openai"
+        # The known system-level key is still there alongside it.
+        assert values["auto_save_history"] is True
 
 
 class TestConcurrency:

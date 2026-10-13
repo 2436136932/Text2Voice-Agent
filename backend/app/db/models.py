@@ -188,13 +188,11 @@ class SettingModel(Base):
         DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow
     )
 
+    #: Only system-level preferences. Generation parameters (provider, model,
+    #: voice, speed, prompt) are owned by the generate page and remembered in
+    #: the browser, so they are intentionally not stored here — a second copy
+    #: would only create a way for the two to disagree.
     DEFAULT_SETTINGS: dict[str, Any] = {
-        "default_llm_provider": "openai",
-        "default_llm_model": "gpt-4o-mini",
-        "default_tts_provider": "openai",
-        "default_tts_voice": "alloy",
-        "default_speed": 1.0,
-        "default_system_prompt": "你是一个乐于助人的中文助手，回答简洁、口语化，适合朗读。",
         "auto_save_history": True,
         # Credentials live ONLY in the browser (localStorage) — the server never
         # receives or stores them. Defaulting to true matches the user's
@@ -202,8 +200,6 @@ class SettingModel(Base):
         # still exposes the switch, with a warning, for shared machines.
         "auto_save_credentials": True,
         "request_timeout_seconds": 120,
-        "temperature": 0.7,
-        "max_tokens": 1024,
     }
 
     @classmethod
