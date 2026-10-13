@@ -64,6 +64,53 @@ def no_ffmpeg(monkeypatch) -> None:
 # Inspect
 # ---------------------------------------------------------------------------
 class TestMediaInspect:
+    async def test_json_body_without_multipart_is_rejected(self, client):
+        """Guard the failure mode that broke uploads in the UI.
+
+        The frontend sent `Content-Type: application/json` (an interceptor
+        overrode multipart), so the file field never arrived. The API must fail
+        loudly with a validation error rather than accepting a bodyless request
+        and reporting a bogus success.
+        """
+        response = await client.post(
+            "/api/v1/media/inspect",
+            json={"file": "not-a-file"},
+        )
+        assert response.status_code == 422, response.text
+        payload = response.json()
+        assert payload["code"] == "VALIDATION_ERROR"
+
+    async def test_multipart_with_wrong_field_name_is_rejected(self, client):
+        """The field name is part of the contract; 'upload' is not 'file'."""
+        response = await client.post(
+            "/api/v1/media/inspect",
+            files={"upload": ("voice.wav", make_wav(duration_ms=500), "audio/wav")},
+        )
+        assert response.status_code == 422, response.text
+
+    async def test_default_and_custom_trim_lengths(self, client):
+        """Any window the user picks must be honoured, not a fixed length."""
+        data = make_wav(duration_ms=30_000)
+        created = await upload(client, data, "long.wav")
+        assert created.status_code == 200, created.text
+        media_id = created.json()["media_id"]
+
+        for start_ms, end_ms in ((0, 3_000), (5_000, 8_000), (27_000, 30_000)):
+            trimmed = await client.post(
+                "/api/v1/media/trim",
+                json={
+                    "media_id": media_id,
+                    "start_ms": start_ms,
+                    "end_ms": end_ms,
+                    "output_format": "wav",
+                },
+            )
+            assert trimmed.status_code == 200, trimmed.text
+            duration = trimmed.json()["duration_ms"]
+            assert abs(duration - (end_ms - start_ms)) < 200, (
+                f"expected ~{end_ms - start_ms}ms, got {duration}ms"
+            )
+
     async def test_wav_reports_duration_rate_and_channels(self, client):
         response = await upload(client, make_wav(duration_ms=1500), "voice.wav")
         assert response.status_code == 200, response.text

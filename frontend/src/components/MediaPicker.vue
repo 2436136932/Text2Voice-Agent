@@ -10,7 +10,7 @@
  * The component never uploads on its own — it emits `update:mediaId` after the
  * backend has accepted the file, so the parent owns the lifecycle.
  */
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { Delete, Download, Scissor, UploadFilled, VideoPlay } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { deleteMedia, inspectMedia, mediaUrl, trimMedia } from '@/api'
@@ -59,10 +59,38 @@ const localError = ref<string | null>(null)
 /** Original upload, kept so "重置裁剪" can restore it. */
 const original = ref<MediaInfo | null>(null)
 
+/** The `<audio>` / `<video>` element, used to preview the trim selection. */
+const playerRef = ref<HTMLMediaElement | null>(null)
+
 /* ------------------------------- trimming ------------------------------- */
 
 const trimStart = ref(0)
 const trimEnd = ref(0)
+
+/** Quick length presets — the common cloning window is 5–30 s. */
+const TRIM_PRESETS = [
+  { label: '5 秒', ms: 5_000 },
+  { label: '10 秒', ms: 10_000 },
+  { label: '20 秒', ms: 20_000 },
+  { label: '30 秒', ms: 30_000 },
+  { label: '1 分钟', ms: 60_000 },
+] as const
+
+/** Slider granularity: fine for short clips, coarse enough for long ones. */
+const trimStep = computed<number>(() => (durationMs.value > 120_000 ? 500 : 100))
+
+/** Tick labels so a long file is still readable on the slider. */
+const trimMarks = computed<Record<number, string>>(() => {
+  const total = durationMs.value
+  if (total <= 0) return {}
+  const marks: Record<number, string> = { 0: '0' }
+  const parts = total > 300_000 ? 4 : 2
+  for (let i = 1; i <= parts; i += 1) {
+    const at = Math.round((total * i) / (parts + 1))
+    marks[at] = formatDuration(at)
+  }
+  return marks
+})
 
 const durationMs = computed<number>(() => info.value?.duration_ms ?? 0)
 const canTrim = computed<boolean>(
@@ -76,15 +104,181 @@ const trimDirty = computed<boolean>(
   () => trimStart.value > 0 || (durationMs.value > 0 && trimEnd.value < durationMs.value),
 )
 
+/** Reactive proxy for `<el-slider range>`; keeps start <= end by construction. */
+const trimRange = computed({
+  get: (): [number, number] => [trimStart.value, trimEnd.value],
+  set: (value: number[] | [number, number]): void => {
+    const [start, end] = value
+    trimStart.value = Math.max(0, Math.min(start, end))
+    trimEnd.value = Math.min(durationMs.value, Math.max(start, end))
+  },
+})
+
+/* ---- time text fields (accept "1:23.5" or "83.5s" or raw ms) ---------- */
+
+function msToText(ms: number): string {
+  const totalSeconds = ms / 1000
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds - minutes * 60
+  return `${minutes}:${seconds.toFixed(1).padStart(4, '0')}`
+}
+
+/**
+ * Parse a human time string into milliseconds.
+ *
+ * Accepts `1:23.5`, `83.5s`, `83.5`, or `83500ms`; returns null when the input
+ * cannot be understood so the caller can revert instead of guessing.
+ */
+function parseTimeText(raw: string): number | null {
+  const text = raw.trim().toLowerCase()
+  if (!text) return null
+  if (text.endsWith('ms')) {
+    const value = Number.parseFloat(text.slice(0, -2))
+    return Number.isFinite(value) ? Math.max(0, Math.round(value)) : null
+  }
+  const bare = text.endsWith('s') ? text.slice(0, -1) : text
+  if (bare.includes(':')) {
+    const [minPart, secPart] = bare.split(':')
+    const minutes = Number.parseFloat(minPart)
+    const seconds = Number.parseFloat(secPart)
+    if (!Number.isFinite(minutes) || !Number.isFinite(seconds)) return null
+    return Math.max(0, Math.round((minutes * 60 + seconds) * 1000))
+  }
+  const seconds = Number.parseFloat(bare)
+  return Number.isFinite(seconds) ? Math.max(0, Math.round(seconds * 1000)) : null
+}
+
+const trimStartText = ref('0:00.0')
+const trimEndText = ref('0:00.0')
+const trimLengthText = ref('0:00.0')
+const editingTime = ref(false)
+
+/** Mirror the numeric state into the text fields (unless the user is typing). */
+function syncTimeTexts(): void {
+  if (editingTime.value) return
+  trimStartText.value = msToText(trimStart.value)
+  trimEndText.value = msToText(trimEnd.value)
+  trimLengthText.value = msToText(trimWindowMs.value)
+}
+
+function commitStartText(): void {
+  const parsed = parseTimeText(trimStartText.value)
+  editingTime.value = false
+  if (parsed === null) {
+    syncTimeTexts()
+    return
+  }
+  trimStart.value = Math.min(parsed, Math.max(0, trimEnd.value - 200))
+  syncTimeTexts()
+}
+
+function commitEndText(): void {
+  const parsed = parseTimeText(trimEndText.value)
+  editingTime.value = false
+  if (parsed === null) {
+    syncTimeTexts()
+    return
+  }
+  trimEnd.value = Math.max(Math.min(parsed, durationMs.value), trimStart.value + 200)
+  syncTimeTexts()
+}
+
+/** Setting a *length* keeps the start fixed and moves the end. */
+function commitLengthText(): void {
+  const parsed = parseTimeText(trimLengthText.value)
+  editingTime.value = false
+  if (parsed === null) {
+    syncTimeTexts()
+    return
+  }
+  const wanted = Math.max(200, parsed)
+  if (trimStart.value + wanted <= durationMs.value) {
+    trimEnd.value = trimStart.value + wanted
+  } else {
+    // Not enough room after the start: anchor the window at the end of the file.
+    trimEnd.value = durationMs.value
+    trimStart.value = Math.max(0, durationMs.value - wanted)
+  }
+  syncTimeTexts()
+}
+
+const activePreset = computed<string | null>(() => {
+  const match = TRIM_PRESETS.find((preset) => preset.ms === trimWindowMs.value)
+  return match ? match.label : null
+})
+
+/** Apply a preset length starting at the current start position. */
+function applyPreset(ms: number): void {
+  if (ms >= durationMs.value) {
+    trimStart.value = 0
+    trimEnd.value = durationMs.value
+  } else if (trimStart.value + ms <= durationMs.value) {
+    trimEnd.value = trimStart.value + ms
+  } else {
+    trimEnd.value = durationMs.value
+    trimStart.value = Math.max(0, durationMs.value - ms)
+  }
+  syncTimeTexts()
+}
+
 watch(durationMs, (value) => {
   trimStart.value = 0
   trimEnd.value = value
+  syncTimeTexts()
 })
+
+watch([trimStart, trimEnd], syncTimeTexts)
 
 function resetTrim(): void {
   trimStart.value = 0
   trimEnd.value = durationMs.value
+  syncTimeTexts()
 }
+
+/* ---- preview the selected segment without trimming it ------------------ */
+
+const previewing = ref(false)
+let previewStopTimer: ReturnType<typeof setTimeout> | null = null
+
+/**
+ * Play only the selected window, then stop.
+ *
+ * Lets the user confirm the cut before committing to a trim, which matters most
+ * on long files where the interesting part is hard to find by scrubbing.
+ */
+function previewSelection(): void {
+  const el = playerRef.value
+  if (!el) return
+  if (previewStopTimer !== null) {
+    clearTimeout(previewStopTimer)
+    previewStopTimer = null
+  }
+  el.currentTime = trimStart.value / 1000
+  void el.play().catch(() => undefined)
+  previewing.value = true
+  previewStopTimer = setTimeout(() => {
+    el.pause()
+    previewing.value = false
+    previewStopTimer = null
+  }, trimWindowMs.value)
+}
+
+function onPlayerTimeUpdate(): void {
+  const el = playerRef.value
+  if (!el || !previewing.value) return
+  if (el.currentTime * 1000 >= trimEnd.value) {
+    el.pause()
+    previewing.value = false
+    if (previewStopTimer !== null) {
+      clearTimeout(previewStopTimer)
+      previewStopTimer = null
+    }
+  }
+}
+
+onBeforeUnmount(() => {
+  if (previewStopTimer !== null) clearTimeout(previewStopTimer)
+})
 
 async function applyTrim(): Promise<void> {
   if (!info.value) return
@@ -271,18 +465,22 @@ const isVideo = computed<boolean>(() => info.value?.kind === 'video')
       <!-- Video preview (画面 + 声音) -->
       <video
         v-if="isVideo && previewSrc"
+        ref="playerRef"
         class="media-picker__video"
         :src="previewSrc"
         controls
         preload="metadata"
+        @timeupdate="onPlayerTimeUpdate"
       ></video>
       <!-- Audio preview -->
       <audio
         v-else-if="previewSrc"
+        ref="playerRef"
         class="media-picker__audio"
         :src="previewSrc"
         controls
         preload="metadata"
+        @timeupdate="onPlayerTimeUpdate"
       ></audio>
 
       <el-alert
@@ -299,45 +497,67 @@ const isVideo = computed<boolean>(() => info.value?.kind === 'video')
         <div class="media-picker__trim-head">
           <el-icon><Scissor /></el-icon>
           <span>裁剪片段</span>
-          <span class="t2v-muted">保留 {{ formatDuration(trimWindowMs) }}</span>
+          <span class="t2v-muted">
+            已选 {{ formatDuration(trimWindowMs) }} / 全长 {{ formatDuration(durationMs) }}
+          </span>
         </div>
+
+        <!-- Dual-handle range: far easier to aim on a long clip than two
+             independent sliders, and it cannot produce start > end. -->
         <el-slider
-          v-model="trimStart"
+          v-model="trimRange"
+          range
           :min="0"
           :max="durationMs"
-          :step="50"
-          :show-tooltip="false"
+          :step="trimStep"
+          :marks="trimMarks"
+          :disabled="trimming"
         />
-        <el-slider
-          v-model="trimEnd"
-          :min="0"
-          :max="durationMs"
-          :step="50"
-          :show-tooltip="false"
-        />
+
         <div class="media-picker__trim-values">
-          <el-input-number
-            v-model="trimStart"
-            :min="0"
-            :max="Math.max(0, trimEnd - 200)"
-            :step="100"
-            size="small"
-            controls-position="right"
-          />
-          <span class="t2v-muted">→</span>
-          <el-input-number
-            v-model="trimEnd"
-            :min="trimStart + 200"
-            :max="durationMs"
-            :step="100"
-            size="small"
-            controls-position="right"
-          />
-          <span class="t2v-muted">毫秒</span>
+          <div class="media-picker__time-field">
+            <span class="media-picker__time-label">起点</span>
+            <el-input v-model="trimStartText" size="small" class="media-picker__time-input"
+                      @change="commitStartText" @blur="commitStartText" />
+            <span class="t2v-muted">{{ formatDuration(trimStart) }}</span>
+          </div>
+          <div class="media-picker__time-field">
+            <span class="media-picker__time-label">终点</span>
+            <el-input v-model="trimEndText" size="small" class="media-picker__time-input"
+                      @change="commitEndText" @blur="commitEndText" />
+            <span class="t2v-muted">{{ formatDuration(trimEnd) }}</span>
+          </div>
+          <div class="media-picker__time-field">
+            <span class="media-picker__time-label">时长</span>
+            <el-input v-model="trimLengthText" size="small" class="media-picker__time-input"
+                      @change="commitLengthText" @blur="commitLengthText" />
+            <span class="t2v-muted">从起点起算</span>
+          </div>
         </div>
+        <div class="media-picker__hint">
+          支持 <span class="t2v-mono">1:23.5</span>（分:秒）或 <span class="t2v-mono">83.5s</span> 两种写法；
+          也可以直接输入总时长来自定裁剪长度。
+        </div>
+
+        <div class="media-picker__presets">
+          <span class="t2v-muted">快速选择长度：</span>
+          <el-button
+            v-for="preset in TRIM_PRESETS"
+            :key="preset.label"
+            size="small"
+            :type="activePreset === preset.label ? 'primary' : 'default'"
+            @click="applyPreset(preset.ms)"
+          >
+            {{ preset.label }}
+          </el-button>
+        </div>
+
         <div class="media-picker__trim-actions">
           <el-button size="small" :icon="Scissor" :loading="trimming" @click="applyTrim">
             应用裁剪
+          </el-button>
+          <el-button size="small" :icon="VideoPlay" @click="previewSelection">
+            试听选中片段
           </el-button>
           <el-button size="small" :disabled="!trimDirty" @click="resetTrim">重置选区</el-button>
           <el-button
@@ -459,8 +679,39 @@ const isVideo = computed<boolean>(() => info.value?.kind === 'video')
 .media-picker__trim-values {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin: 8px 0;
+  gap: 16px;
+  margin: 10px 0;
+  flex-wrap: wrap;
+}
+
+.media-picker__time-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.media-picker__time-label {
+  color: var(--el-text-color-regular);
+  white-space: nowrap;
+}
+
+.media-picker__time-input {
+  width: 92px;
+}
+
+.media-picker__presets {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+
+.media-picker__trim :deep(.el-slider__marks-text) {
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .media-picker__trim-actions {

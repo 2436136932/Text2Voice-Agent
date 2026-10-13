@@ -216,8 +216,10 @@ export const API_BASE_URL: string = import.meta.env.VITE_API_BASE_URL || '/api/v
 export const http: AxiosInstance = axios.create({
   baseURL: API_BASE_URL,
   timeout: DEFAULT_REQUEST_TIMEOUT_MS,
+  // Note: no default Content-Type here on purpose. A per-instance JSON default
+  // would be inherited by FormData requests and suppress the multipart
+  // boundary; the request interceptor sets JSON only when appropriate.
   headers: {
-    'Content-Type': 'application/json',
     Accept: 'application/json',
   },
 })
@@ -228,7 +230,15 @@ http.interceptors.request.use((config: InternalAxiosRequestConfig) => {
   if (!headers.get('X-Request-ID')) {
     headers.set('X-Request-ID', createRequestId())
   }
-  headers.set('Content-Type', 'application/json')
+  // Only default the content type for JSON bodies. A FormData upload must keep
+  // the browser-generated `multipart/form-data; boundary=...` header — forcing
+  // JSON here silently broke every file upload (the body was serialised as
+  // JSON, so the server never saw the file field).
+  const isFormData =
+    typeof FormData !== 'undefined' && config.data instanceof FormData
+  if (!isFormData) {
+    headers.set('Content-Type', 'application/json')
+  }
   config.headers = headers
   return config
 })

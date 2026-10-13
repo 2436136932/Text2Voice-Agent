@@ -102,8 +102,9 @@ export function fetchCapabilities(): Promise<CapabilitiesResponse> {
 export async function inspectMedia(file: File, onProgress?: (percent: number) => void): Promise<MediaInfo> {
   const form = new FormData()
   form.append('file', file)
+  // Do NOT set Content-Type manually: the browser must add the multipart
+  // boundary itself, otherwise the server cannot parse the file field.
   const response = await http.post<MediaInfo>('/media/inspect', form, {
-    headers: { 'Content-Type': 'multipart/form-data' },
     onUploadProgress: (event) => {
       if (!onProgress || !event.total) return
       onProgress(Math.round((event.loaded / event.total) * 100))
