@@ -64,6 +64,53 @@ def no_ffmpeg(monkeypatch) -> None:
 # Inspect
 # ---------------------------------------------------------------------------
 class TestMediaInspect:
+    async def test_upload_uses_the_upload_limit_not_the_json_limit(self, client, settings):
+        """A video larger than the JSON body limit must still be accepted.
+
+        Regression: the middleware applied `max_request_bytes` (2 MB) to every
+        route, so a 16 MB mp4 was rejected with 413 while the UI advertised
+        `max_upload_mb` (50 MB) — and because the rejection did not drain the
+        body, the browser surfaced it as ERR_CONNECTION_RESET.
+        """
+        from app.api.middleware import RequestContextMiddleware
+
+        upload_limit = RequestContextMiddleware._body_limit_for("/api/v1/media/inspect")
+        json_limit = RequestContextMiddleware._body_limit_for("/api/v1/generate")
+        assert upload_limit == settings.max_upload_mb * 1024 * 1024
+        assert json_limit == settings.max_request_bytes
+        assert upload_limit > json_limit
+
+        # A payload comfortably above the JSON limit but below the upload limit.
+        big = make_wav(duration_ms=120_000)
+        assert len(big) > json_limit, "fixture must exceed the JSON limit to be meaningful"
+        assert len(big) < upload_limit
+
+        response = await upload(client, big, "long.wav")
+        assert response.status_code == 200, response.text
+
+    async def test_json_routes_keep_the_small_limit(self, client, settings):
+        """The larger upload budget must not leak into normal JSON endpoints."""
+        oversized = settings.max_request_bytes + 1024
+        response = await client.post(
+            "/api/v1/generate",
+            content=b"x" * oversized,
+            headers={"Content-Type": "application/json"},
+        )
+        assert response.status_code == 413
+        assert response.json()["code"] == "PAYLOAD_TOO_LARGE"
+
+    async def test_oversized_upload_is_rejected_with_guidance(self, client, settings, monkeypatch):
+        """Above the upload limit: 413 with a suggestion, not a dropped socket."""
+        monkeypatch.setattr(settings, "max_upload_mb", 1)
+        big = make_wav(duration_ms=60_000)
+        assert len(big) > 1024 * 1024
+
+        response = await upload(client, big, "huge.wav")
+        assert response.status_code == 413, response.text
+        payload = response.json()
+        assert payload["code"] == "PAYLOAD_TOO_LARGE"
+        assert payload["detail"].get("suggestion")
+
     async def test_json_body_without_multipart_is_rejected(self, client):
         """Guard the failure mode that broke uploads in the UI.
 
@@ -142,12 +189,22 @@ class TestMediaInspect:
         assert body["detail"]["suggestion"]
 
     async def test_oversized_upload_is_413(self, client, settings, monkeypatch):
+        """Oversized uploads are rejected with guidance.
+
+        Which layer catches it depends on the size: the middleware rejects
+        anything above `max_upload_mb` (PAYLOAD_TOO_LARGE) before the body is
+        read, while the route itself raises MEDIA_TOO_LARGE. Both are correct,
+        and both must carry an actionable suggestion.
+        """
         monkeypatch.setattr(settings, "max_upload_mb", 0)
         response = await upload(client, make_wav(duration_ms=200), "big.wav")
         assert response.status_code == 413
         body = response.json()
-        assert body["code"] == ErrorCode.MEDIA_TOO_LARGE.value
-        assert "suggestion" in body["detail"]
+        assert body["code"] in {
+            ErrorCode.MEDIA_TOO_LARGE.value,
+            "PAYLOAD_TOO_LARGE",
+        }
+        assert body["detail"].get("suggestion")
 
     async def test_video_without_ffmpeg_warns_and_is_not_trimmable(self, client, monkeypatch):
         no_ffmpeg(monkeypatch)

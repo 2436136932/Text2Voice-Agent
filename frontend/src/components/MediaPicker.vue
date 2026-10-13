@@ -11,7 +11,7 @@
  * backend has accepted the file, so the parent owns the lifecycle.
  */
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { Delete, Download, Scissor, UploadFilled, VideoPlay } from '@element-plus/icons-vue'
+import { Delete, Download, RefreshRight, Scissor, UploadFilled, VideoPlay } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { deleteMedia, inspectMedia, mediaUrl, trimMedia } from '@/api'
 import { ApiError } from '@/api/http'
@@ -55,6 +55,25 @@ const trimming = ref(false)
 const dragActive = ref(false)
 const info = ref<MediaInfo | null>(props.media ?? null)
 const localError = ref<string | null>(null)
+
+/** The file whose upload failed, kept so "重新上传" can resend it. */
+const lastFailedFile = ref<File | null>(null)
+const lastFailedName = computed<string>(() => lastFailedFile.value?.name ?? '')
+
+/** Prompt shown inside the drop zone; switches to a retry wording after a failure. */
+const retryPrompt = computed<string>(() =>
+  localError.value ? '点击或拖拽，重新上传' : '点击或拖拽上传音频 / 视频',
+)
+
+/** Re-send the file that failed, without making the user find it again. */
+function retryUpload(): void {
+  const file = lastFailedFile.value
+  if (!file) {
+    openFileDialog()
+    return
+  }
+  void handleFile(file)
+}
 
 /** The single hidden file input this component owns. */
 const fileInputRef = ref<HTMLInputElement | null>(null)
@@ -341,7 +360,10 @@ async function restoreOriginal(): Promise<void> {
 async function handleFile(file: File): Promise<void> {
   localError.value = null
   if (file.size > props.maxSizeMb * 1024 * 1024) {
-    localError.value = `文件过大：${formatBytes(file.size)}，上限 ${props.maxSizeMb} MB`
+    lastFailedFile.value = file
+    localError.value =
+      `文件过大：${formatBytes(file.size)}，上限 ${props.maxSizeMb} MB。` +
+      '请先裁剪出较短的片段，或压缩后再上传。'
     ElMessage.error(localError.value)
     return
   }
@@ -354,6 +376,8 @@ async function handleFile(file: File): Promise<void> {
     })
     info.value = result
     original.value = result
+    lastFailedFile.value = null
+    localError.value = null
     resetTrim()
     emit('update:mediaId', result.media_id)
     emit('update:media', result)
@@ -364,6 +388,8 @@ async function handleFile(file: File): Promise<void> {
       ElMessage.success(`已导入 ${result.filename}（${formatDuration(result.duration_ms)}）`)
     }
   } catch (error) {
+    // Remember the file so the user can retry with one click.
+    lastFailedFile.value = file
     showError(error, '导入失败')
   } finally {
     uploading.value = false
@@ -458,7 +484,7 @@ const isVideo = computed<boolean>(() => info.value?.kind === 'video')
       <div class="media-picker__inner">
         <el-icon class="media-picker__icon"><UploadFilled /></el-icon>
         <div class="media-picker__title">
-          {{ uploading ? `上传中 ${uploadPercent}%` : '点击或拖拽上传音频 / 视频' }}
+          {{ uploading ? `上传中 ${uploadPercent}%` : retryPrompt }}
         </div>
         <div class="media-picker__sub">
           支持 {{ accept }}，单文件不超过 {{ maxSizeMb }} MB
@@ -479,7 +505,36 @@ const isVideo = computed<boolean>(() => info.value?.kind === 'video')
       />
     </div>
 
-    <div v-else class="media-picker__preview">
+    <!--
+      A failed upload must be recoverable. The drop zone stays available, and the
+      reason plus a retry action are shown explicitly — previously the error was
+      only a transient toast, so after it faded the panel looked untouched and
+      the user had no idea what went wrong or what to do next.
+    -->
+    <el-alert
+      v-if="!info && localError"
+      class="media-picker__failure"
+      type="error"
+      show-icon
+      :closable="false"
+      :title="lastFailedName ? `上传失败：${lastFailedName}` : '上传失败'"
+    >
+      <template #default>
+        <div class="media-picker__failure-body">{{ localError }}</div>
+        <div class="media-picker__failure-actions">
+          <el-button size="small" type="primary" :icon="RefreshRight" @click="retryUpload">
+            重新上传
+          </el-button>
+          <el-button v-if="lastFailedFile" size="small" @click="openFileDialog">
+            选择其他文件
+          </el-button>
+        </div>
+      </template>
+    </el-alert>
+
+    <!-- Preview is keyed off `info` explicitly. Using v-else here would pair it
+         with the alert above and stop TypeScript narrowing `info` to non-null. -->
+    <div v-if="info" class="media-picker__preview">
       <div class="media-picker__meta">
         <el-tag size="small" :type="isVideo ? 'warning' : 'success'" effect="plain">
           {{ isVideo ? '视频' : '音频' }}
@@ -632,6 +687,22 @@ const isVideo = computed<boolean>(() => info.value?.kind === 'video')
 
 .media-picker__drop.is-busy {
   cursor: progress;
+}
+
+.media-picker__failure {
+  margin-top: 10px;
+}
+
+.media-picker__failure-body {
+  font-size: 12px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.media-picker__failure-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
 }
 
 .media-picker__inner {
