@@ -127,6 +127,36 @@ def media_missing_error(media_id: str) -> AppError:
     )
 
 
+def clone_requires_registration_error(provider_id: str, model: str = "") -> AppError:
+    """The provider clones by *registering* a voice, not by per-call reference.
+
+    ElevenLabs and MiniMax expose a real clone API: the clip is uploaded once,
+    the vendor returns a permanent ``voice_id``, and every later synthesis just
+    references that id. There is no way to attach a clip to a single synthesis
+    call, so a request that carries one must be refused **loudly** — otherwise
+    the clip is dropped and the user gets a built-in voice while believing they
+    asked for a clone, which is worse than an error.
+    """
+    return AppError(
+        ErrorCode.TTS_REFERENCE_UNSUPPORTED,
+        f"服务商 “{provider_id}” 不支持在合成时携带参考音频；"
+        "它需要先注册音色，再选用该音色合成。",
+        detail={
+            "provider": provider_id,
+            "model": model,
+            "clone_mode": "register-then-use",
+            "suggestion": (
+                "请先在「系统设置 → 声音克隆」上传这段参考音频并创建音色"
+                "（克隆完成后该音色会出现在音色列表的「我的音色」中），"
+                "然后在音色下拉框里选中它再生成；"
+                "或者改用支持合成时携带参考音频的服务商："
+                + ("、".join(reference_capable_ids()) or "（当前环境无）")
+                + "。"
+            ),
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # Service
 # ---------------------------------------------------------------------------

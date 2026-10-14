@@ -93,30 +93,36 @@ const mode = computed<GenerationMode>({
 
 const activeMode = computed(() => MODES.find((item) => item.value === mode.value) ?? MODES[0])
 
-/** Providers that can actually clone — used to build an actionable warning. */
-const cloneCapableNames = computed<string[]>(() => {
-  const list = capabilities.value?.voice_clone.supported_providers ?? []
+/**
+ * Providers that accept a reference clip at synthesis time — the only ones
+ * this page's clone mode can drive. Providers that clone by registering a
+ * voice are listed separately by the settings page.
+ */
+const cloneReferenceCapableNames = computed<string[]>(() => {
   const reference = capabilities.value?.voice_clone.reference_audio_providers ?? []
-  const ids = Array.from(new Set([...list, ...reference]))
-  return ids
+  return reference
     .map((id) => configStore.ttsProviders.find((item) => item.id === id)?.name ?? id)
     .filter(Boolean)
 })
 
-/**
- * Whether the selected TTS provider can consume a reference clip at all.
- * When it cannot we block submission and explain exactly what to change —
- * this is the "friendly error" the user asked for, surfaced *before* the call
- * instead of after a confusing upstream failure.
- */
-const cloneSupported = computed(() => configStore.supportsAnyCloning)
-
 const cloneBlockReason = computed<string | null>(() => {
   if (mode.value !== 'clone') return null
   if (!configStore.ttsProviderId) return '请先在「系统设置」中选择语音合成服务商'
-  if (!cloneSupported.value) {
-    const names = cloneCapableNames.value.length > 0 ? cloneCapableNames.value.join('、') : 'ElevenLabs、MiniMax、自定义(OpenAI 兼容)'
-    return `当前服务商「${configStore.ttsProvider?.name ?? configStore.ttsProviderId}」不支持声音克隆。请在「系统设置」中切换到 ${names}，或改用「文字转语音」模式。`
+  // Two clone shapes exist. This page can only attach a clip to the synthesis
+  // call, which requires supports_reference_audio (MiMo, custom). Providers
+  // that clone by *registering* a voice (ElevenLabs, MiniMax) must be used
+  // through the settings page first — telling the user that here is far
+  // clearer than letting them press generate and get a backend error.
+  if (!configStore.supportsReferenceAudio) {
+    const providerName = configStore.ttsProvider?.name ?? configStore.ttsProviderId
+    if (configStore.supportsVoiceClone) {
+      return `「${providerName}」需要先注册音色再使用：请到「系统设置 → 语音合成服务商」上传参考音频创建音色，然后在音色列表里选中它。它不支持在生成时直接携带参考音频。`
+    }
+    const names =
+      cloneReferenceCapableNames.value.length > 0
+        ? cloneReferenceCapableNames.value.join('、')
+        : '小米 MiMo TTS、自定义 (OpenAI 兼容)'
+    return `当前服务商「${providerName}」不支持声音克隆。请在「系统设置」中切换到 ${names}，或改用「文字转语音」模式。`
   }
   if (!referenceMedia.value) return '请先上传一段参考音频或视频（建议 5–30 秒清晰人声）'
   return null

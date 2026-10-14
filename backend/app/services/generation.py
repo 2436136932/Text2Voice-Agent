@@ -54,7 +54,11 @@ from app.services.cache import cache_key, tts_cache
 from app.services.media import media_store
 from app.services.metrics import metrics
 from app.services.providers import annotate_tts_error
-from app.services.voices import media_missing_error, reference_unsupported_error
+from app.services.voices import (
+    clone_requires_registration_error,
+    media_missing_error,
+    reference_unsupported_error,
+)
 
 logger = get_logger(__name__)
 
@@ -290,11 +294,20 @@ class GenerationService:
                     raise media_missing_error(resolved_media_id) from exc
                 raise
 
-            # Then validate the capability, *before* spending a TTS call: a
-            # provider that can neither clone nor consume a reference clip
-            # would silently ignore the clip and produce the wrong voice, which
-            # is worse than an error.
-            if not (adapter.supports_reference_audio or adapter.supports_voice_clone):
+            # Then validate the capability, *before* spending a TTS call. Two
+            # distinct shapes exist and they must not be conflated, or the
+            # reference clip is silently dropped and the user hears a preset
+            # voice while believing they cloned:
+            #
+            #   1. consumes a clip at synthesis time (MiMo, custom) — usable;
+            #   2. requires registering the voice first (ElevenLabs, MiniMax)
+            #      — usable, but only through the register-then-select flow;
+            #   3. neither — refused.
+            if not adapter.supports_reference_audio:
+                if adapter.supports_voice_clone:
+                    raise clone_requires_registration_error(
+                        adapter.id, request.tts.model or ""
+                    )
                 raise reference_unsupported_error(adapter.id, request.tts.model or "")
 
             extra["reference_audio_media_id"] = record.media_id
