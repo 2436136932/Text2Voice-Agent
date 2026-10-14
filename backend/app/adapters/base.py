@@ -654,6 +654,12 @@ class TTSAdapter(BaseAdapter):
     #: this, attaching a clip to a plain TTS model makes the adapter silently
     #: ignore the clip and speak in a preset voice.
     clone_model: str = ""
+    #: The inverse of :attr:`clone_model`: the model to fall back to when a
+    #: clone-only model is configured but no reference clip is present. The
+    #: model choice persists between runs, so picking a clone model once would
+    #: otherwise break every later plain synthesis with "reference audio
+    #: required". Empty = the adapter has no such distinction.
+    plain_model: str = ""
     content_type_map: dict[str, str] = {
         "mp3": "audio/mpeg",
         "wav": "audio/wav",

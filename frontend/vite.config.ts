@@ -1,6 +1,8 @@
 import { fileURLToPath, URL } from 'node:url'
-import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
+
+// `vitest/config` re-exports defineConfig with the `test` key typed.
+import { defineConfig } from 'vitest/config'
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -46,5 +48,11 @@ export default defineConfig({
         },
       },
     },
+  },
+  test: {
+    // Pure-logic unit tests only (no component/DOM tests yet), so the node
+    // environment is enough and startup stays fast.
+    environment: 'node',
+    include: ['src/**/*.spec.ts'],
   },
 })

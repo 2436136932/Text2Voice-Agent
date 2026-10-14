@@ -6,7 +6,8 @@
 import { computed, ref } from 'vue'
 import { Delete, MagicStick, Microphone } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { MAX_TEXT_LENGTH, useConfigStore } from '@/stores/config'
+import { MAX_TEXT_LENGTH, MAX_TOTAL_TEXT_LENGTH, useConfigStore } from '@/stores/config'
+import { segmentText } from '@/utils/segment'
 
 const props = withDefaults(
   defineProps<{
@@ -31,7 +32,10 @@ const emit = defineEmits<{
 
 const configStore = useConfigStore()
 
+/** Per-request limit; longer text is segmented (see segmentCount below). */
 const maxLen = MAX_TEXT_LENGTH
+/** Ceiling for the whole input, so one run cannot queue hundreds of jobs. */
+const maxTotal = MAX_TOTAL_TEXT_LENGTH
 
 /** Sample text used by the 示例文本 button. */
 const SAMPLE_TEXT =
@@ -53,9 +57,27 @@ const text = computed<string>({
 })
 
 /** Live character counter, e.g. `128 / 5000`. */
-const counter = computed<string>(() => `${text.value.length} / ${maxLen}`)
+/**
+ * Live character counter. Shows the per-request limit while the text fits in
+ * one call, then switches to the total ceiling once segmentation kicks in —
+ * otherwise "6000 / 5000" would look like an error rather than a split.
+ */
+const counter = computed<string>(() => {
+  if (text.value.length <= maxLen) return `${text.value.length} / ${maxLen}`
+  return `${text.value.length} / ${maxTotal}`
+})
 
 const trimmedLength = computed<number>(() => text.value.trim().length)
+
+/**
+ * How many requests this text will become. Shown as a badge so "why is my
+ * 20,000-character document accepted when the limit is 5,000?" is answered
+ * before the user presses generate.
+ */
+const segmentCount = computed<number>(() => {
+  if (trimmedLength.value <= maxLen) return 1
+  return segmentText(text.value, { limit: maxLen }).segments.length
+})
 
 /** Whether the button is actually clickable. */
 const enabled = computed<boolean>(() => {
@@ -106,8 +128,7 @@ function handleGenerate(): void {
       v-model="text"
       type="textarea"
       :rows="8"
-      :maxlength="maxLen"
-      show-word-limit
+      :maxlength="maxTotal"
       resize="vertical"
       placeholder="在这里输入要交给大模型的文本，例如：请用三句话介绍文本转语音技术。"
       class="text-input-card__textarea"
@@ -120,6 +141,9 @@ function handleGenerate(): void {
         <span class="text-input-card__hint t2v-muted">
           当前 {{ trimmedLength }} 个有效字符
         </span>
+        <el-tag v-if="segmentCount > 1" size="small" type="warning" effect="plain">
+          将自动分为 {{ segmentCount }} 段生成
+        </el-tag>
       </div>
 
       <div class="text-input-card__toolbar-right">

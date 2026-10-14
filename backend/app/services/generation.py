@@ -334,6 +334,19 @@ class GenerationService:
                     adapter.id, request.tts.model, clone_model,
                 )
                 request.tts.model = clone_model
+        else:
+            # The inverse case: a clone-only model is configured but this
+            # request carries no clip. The model selection persists between
+            # runs (and between modes), so one clone would otherwise break
+            # every later plain synthesis with "reference audio required" —
+            # exactly what happens after switching 声音克隆 → 文字转语音.
+            plain_model = getattr(adapter, "plain_model", "")
+            if plain_model and request.tts.model == getattr(adapter, "clone_model", ""):
+                logger.info(
+                    "downgrading tts model (no reference audio) provider=%s from=%s to=%s",
+                    adapter.id, request.tts.model, plain_model,
+                )
+                request.tts.model = plain_model
 
         tts_request = TTSRequest(
             text=reply_text,

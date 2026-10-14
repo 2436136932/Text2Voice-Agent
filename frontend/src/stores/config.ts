@@ -25,8 +25,19 @@ import type {
 /** localStorage key for the opt-in credential cache. */
 export const CREDENTIALS_STORAGE_KEY = 't2v:credentials'
 
-/** Maximum accepted input length (mirrors the backend limit). */
+/**
+ * Maximum length of a **single request** (mirrors the backend limit). Longer
+ * input is split at natural boundaries by `utils/segment.ts`, one request per
+ * chunk.
+ */
 export const MAX_TEXT_LENGTH = 5000
+
+/**
+ * Ceiling for one segmented run. Roughly 20 chunks — enough for a long article
+ * or a short audiobook chapter, while keeping a single click from queueing
+ * hundreds of vendor calls.
+ */
+export const MAX_TOTAL_TEXT_LENGTH = MAX_TEXT_LENGTH * 20
 
 /**
  * Generation modes.
@@ -249,7 +260,11 @@ export const useConfigStore = defineStore('config', {
      */
     canGenerate(state): boolean {
       if (state.text.trim().length === 0) return false
-      if (state.text.length > MAX_TEXT_LENGTH) return false
+      // Longer text is accepted: the generate page segments it and queues one
+      // request per chunk. MAX_TEXT_LENGTH stays the *per-request* limit (it is
+      // what the backend enforces); MAX_TOTAL_TEXT_LENGTH is the ceiling for a
+      // single segmented run, to keep one click from queueing hundreds of jobs.
+      if (state.text.length > MAX_TOTAL_TEXT_LENGTH) return false
       if (state.ttsProviderId.length === 0) return false
       if (state.ttsVoice.trim().length === 0) return false
 
@@ -272,7 +287,12 @@ export const useConfigStore = defineStore('config', {
     disabledReasons(state): string[] {
       const reasons: string[] = []
       if (state.text.trim().length === 0) reasons.push('请输入要生成的文本')
-      if (state.text.length > MAX_TEXT_LENGTH) reasons.push(`文本长度不能超过 ${MAX_TEXT_LENGTH} 个字符`)
+      if (state.text.length > MAX_TOTAL_TEXT_LENGTH) {
+        reasons.push(
+          `单次生成的文本总长度不能超过 ${MAX_TOTAL_TEXT_LENGTH} 个字符` +
+            `（当前 ${state.text.length}，超出部分请分批生成）`,
+        )
+      }
       if (!state.providersLoaded) reasons.push('服务商列表尚未加载完成')
 
       const needsLLM = state.mode === 'tts'

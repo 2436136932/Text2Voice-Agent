@@ -26,12 +26,14 @@ import { cancelTask, fetchCapabilities, fetchTask, fetchTaskResult, submitTask }
 import type {
   CapabilitiesResponse,
   GenerateOptions,
+  GenerateRequest,
   GenerateResponse,
   MediaInfo,
   TaskStatusResponse,
 } from '@/api/types'
-import { useConfigStore, type GenerationMode } from '@/stores/config'
+import { MAX_TEXT_LENGTH, useConfigStore, type GenerationMode } from '@/stores/config'
 import { stageLabel } from '@/utils/format'
+import { segmentText } from '@/utils/segment'
 
 const configStore = useConfigStore()
 const router = useRouter()
@@ -40,6 +42,8 @@ const router = useRouter()
 
 const POLL_INTERVAL_MS = 900
 const POLL_TIMEOUT_MS = 5 * 60 * 1000
+/** Upper bound on polls per segment in the long-text path (~4 minutes each). */
+const POLL_MAX_ATTEMPTS = 260
 
 const generating = ref(false)
 const task = ref<TaskStatusResponse | null>(null)
@@ -50,13 +54,30 @@ const capabilities = ref<CapabilitiesResponse | null>(null)
 const referenceMedia = ref<MediaInfo | null>(null)
 const canceling = ref(false)
 
+/* Long-text segmentation state (see runSegmented). */
+const segmented = ref(false)
+const segmentResults = ref<GenerateResponse[]>([])
+const segmentIndex = ref(0)
+const segmentTotal = ref(0)
+
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let tickTimer: ReturnType<typeof setInterval> | null = null
 let pollStartedAt = 0
 
-const stageText = computed(() => stageLabel(task.value?.stage ?? 'queued'))
-const progress = computed(() => Math.min(100, Math.max(0, task.value?.progress ?? 0)))
-const stageMessage = computed(() => task.value?.message ?? '')
+const stageText = computed(() => {
+  if (segmented.value) return `第 ${segmentIndex.value} / ${segmentTotal.value} 段`
+  return stageLabel(task.value?.stage ?? 'queued')
+})
+const progress = computed(() => {
+  if (segmented.value && segmentTotal.value > 0) {
+    return Math.round((segmentIndex.value / segmentTotal.value) * 100)
+  }
+  return Math.min(100, Math.max(0, task.value?.progress ?? 0))
+})
+const stageMessage = computed(() => {
+  if (segmented.value) return '长文本分段生成中，每段完成后自动继续'
+  return task.value?.message ?? ''
+})
 const elapsedText = computed(() => `${elapsedSeconds.value}s`)
 const busy = computed(() => generating.value)
 
@@ -223,6 +244,16 @@ async function runGeneration(overrides?: Partial<GenerateOptions>): Promise<void
     return
   }
 
+  // Long text: the backend caps a single request, so split at natural
+  // boundaries and queue each piece. Chunks run through the same task queue
+  // (sequentially, to stay inside the rate limit) and land in history as
+  // separate records, so one failed segment can be regenerated alone.
+  const { segments, single } = segmentText(configStore.text, { limit: MAX_TEXT_LENGTH })
+  if (!single && segments.length > 1) {
+    await runSegmented(payload, segments)
+    return
+  }
+
   generating.value = true
   try {
     const submitted = await submitTask(payload)
@@ -252,6 +283,100 @@ async function runGeneration(overrides?: Partial<GenerateOptions>): Promise<void
       ElMessage.error('提交任务失败')
     }
   }
+}
+
+/**
+ * Generate a long text piece by piece.
+ *
+ * Each segment is submitted, awaited, and its result collected before the next
+ * one starts: sequential submission keeps us inside the expensive-endpoint rate
+ * limit and gives the user a meaningful progress count ("第 3 / 12 段").
+ * Results accumulate in `segments` for the result panel's playlist.
+ */
+async function runSegmented(
+  payload: GenerateRequest,
+  pieces: string[],
+): Promise<void> {
+  generating.value = true
+  segmented.value = true
+  segmentResults.value = []
+  segmentTotal.value = pieces.length
+  segmentIndex.value = 0
+  error.value = null
+  pollStartedAt = Date.now()
+
+  const startedAt = Date.now()
+  tickTimer = setInterval(() => {
+    elapsedSeconds.value = Math.round((Date.now() - startedAt) / 1000)
+  }, 1000)
+
+  try {
+    for (let index = 0; index < pieces.length; index += 1) {
+      segmentIndex.value = index + 1
+      const piece = pieces[index]
+      if (piece === undefined) continue
+
+      const submitted = await submitTask(segmentPayload(payload, piece))
+      const finished = await waitForTask(submitted.task_id)
+      if (finished.status !== 'succeeded') {
+        throw new ApiError({
+          code: finished.error?.code || 'TASK_FAILED',
+          message:
+            `第 ${index + 1} 段生成失败：` +
+            (finished.error?.message || '未知错误') +
+            '。已完成的前几段已保存在历史记录中。',
+          detail: finished.error?.detail,
+        })
+      }
+      const result = await fetchTaskResult(submitted.task_id)
+      segmentResults.value = [...segmentResults.value, result]
+    }
+    ElMessage.success(`${pieces.length} 段全部生成完成`)
+    // Focus the first segment in the result card.
+    result.value = segmentResults.value[0] ?? null
+  } catch (caught) {
+    error.value = caught instanceof ApiError ? caught : null
+    if (!error.value) ElMessage.error('分段生成失败')
+  } finally {
+    finish()
+    segmented.value = false
+  }
+}
+
+/**
+ * Rewrite a built request for one segment.
+ *
+ * `text` alone is not enough: in clone and 直接配音 modes the store sets
+ * `options.reuse_reply_text` to the full original text (that is what the
+ * backend actually speaks, skipping the LLM). Sending the whole document as
+ * the reply for *every* segment would read the text N times, so the segment
+ * must replace both fields together.
+ */
+function segmentPayload(payload: GenerateRequest, piece: string): GenerateRequest {
+  const options = payload.options.reuse_reply_text
+    ? { ...payload.options, reuse_reply_text: piece }
+    : payload.options
+  return { ...payload, text: piece, options }
+}
+
+/**
+ * Poll a task until it reaches a terminal state.
+ *
+ * Kept separate from `poll()` because the segmented path needs to await each
+ * piece without the single-generation UI state machine (timers, cancel button).
+ */
+async function waitForTask(taskId: string): Promise<TaskStatusResponse> {
+  for (let attempt = 0; attempt < POLL_MAX_ATTEMPTS; attempt += 1) {
+    const status = await fetchTask(taskId)
+    if (status.status === 'succeeded' || status.status === 'failed' || status.status === 'canceled') {
+      return status
+    }
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
+  }
+  throw new ApiError({
+    code: 'REQUEST_TIMEOUT',
+    message: '分段生成超时，请稍后在历史记录中查看已完成的部分。',
+  })
 }
 
 function handleRetry(): void {

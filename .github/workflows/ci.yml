@@ -79,6 +79,11 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Unit tests
+        # Pure-logic tests (text segmentation, payload rewriting). Runs before
+        # the build so a logic regression fails fast.
+        run: npm test
+
       - name: Build
         run: npm run build
 

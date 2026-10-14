@@ -105,6 +105,10 @@ class MiMoTTSAdapter(TTSAdapter):
     #: ignore the clip entirely, so the orchestration layer auto-switches to
     #: this model whenever a clip is present.
     clone_model = MODEL_VOICE_CLONE
+    #: The inverse guard. The model selection persists between runs, so after
+    #: one clone the plain path would keep hitting "reference audio required";
+    #: with no clip we fall back to the preset-voice model instead of failing.
+    plain_model = MODEL_TTS
     clone_models = (
         {"id": MODEL_VOICE_CLONE, "name": "mimo-v2.5-tts-voiceclone (音色克隆)"},
     )
