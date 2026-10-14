@@ -21,6 +21,17 @@ export default defineConfig({
         target: 'http://127.0.0.1:8000',
         changeOrigin: true,
       },
+      // Swagger UI lives on the backend; forwarding it means "/docs" works
+      // from the frontend origin too (the header link defaults to the
+      // backend origin, this covers anything else that links relatively).
+      '/docs': {
+        target: 'http://127.0.0.1:8000',
+        changeOrigin: true,
+      },
+      '/openapi.json': {
+        target: 'http://127.0.0.1:8000',
+        changeOrigin: true,
+      },
     },
   },
   build: {

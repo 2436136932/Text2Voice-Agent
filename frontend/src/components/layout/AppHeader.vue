@@ -15,7 +15,15 @@ const route = useRoute()
 const { theme, toggle } = useTheme()
 const isDark = computed(() => theme.value === 'dark')
 
-const docsUrl = import.meta.env.VITE_DOCS_URL || '/docs'
+// Swagger lives on the BACKEND (port 8000). A relative "/docs" would hit the
+// frontend origin, where no such route exists (the Vite proxy only forwards
+// /api) and the user would land on the 404 page. Default to the backend
+// origin in dev; nginx proxies /docs in production so the relative value
+// still works there if VITE_DOCS_URL is set to it.
+const backendOrigin = window.location.port === '5173'
+  ? `${window.location.protocol}//${window.location.hostname}:8000`
+  : ''
+const docsUrl = import.meta.env.VITE_DOCS_URL || `${backendOrigin}/docs`
 const pollIntervalMs = Number(import.meta.env.VITE_HEALTH_POLL_INTERVAL_MS) || 30_000
 
 type HealthState = 'ok' | 'down' | 'checking'
