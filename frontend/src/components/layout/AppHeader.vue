@@ -5,12 +5,15 @@
  */
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { Link, Refresh } from '@element-plus/icons-vue'
+import { Link, Moon, Refresh, Sunny } from '@element-plus/icons-vue'
 import { fetchHealth } from '@/api'
 import { ApiError } from '@/api/http'
 import type { HealthResponse } from '@/api/types'
+import { useTheme } from '@/composables/theme'
 
 const route = useRoute()
+const { theme, toggle } = useTheme()
+const isDark = computed(() => theme.value === 'dark')
 
 const docsUrl = import.meta.env.VITE_DOCS_URL || '/docs'
 const pollIntervalMs = Number(import.meta.env.VITE_HEALTH_POLL_INTERVAL_MS) || 30_000
@@ -115,6 +118,16 @@ onBeforeUnmount(() => {
         />
       </el-tooltip>
 
+      <el-tooltip :content="isDark ? '切换到浅色模式' : '切换到深色模式'" placement="bottom">
+        <el-button
+          :icon="isDark ? Sunny : Moon"
+          circle
+          size="small"
+          aria-label="切换深浅色模式"
+          @click="toggle"
+        />
+      </el-tooltip>
+
       <el-divider direction="vertical" />
 
       <el-button
@@ -143,9 +156,11 @@ onBeforeUnmount(() => {
   gap: 16px;
   height: var(--t2v-header-height);
   padding: 0 var(--t2v-content-padding);
-  background: var(--t2v-bg-surface);
+  /* macOS-style translucent toolbar */
+  background: var(--t2v-bg-sidebar);
+  backdrop-filter: var(--t2v-backdrop-blur);
+  -webkit-backdrop-filter: var(--t2v-backdrop-blur);
   border-bottom: 1px solid var(--t2v-border-color);
-  box-shadow: var(--t2v-shadow-sm);
 }
 
 .app-header__title h1 {

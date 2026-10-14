@@ -6,7 +6,12 @@ import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 
 import 'element-plus/dist/index.css'
+// Dark palette must load BEFORE the app styles so [data-theme] overrides win.
+import 'element-plus/theme-chalk/dark/css-vars.css'
 import '@/styles/main.css'
+
+// Applies the persisted/OS theme to <html> before first paint.
+import '@/composables/theme'
 
 import App from '@/App.vue'
 import router from '@/router'

@@ -46,8 +46,8 @@ const appTitle = import.meta.env.VITE_APP_TITLE || 'Text2Voice Agent'
       :default-active="activeIndex"
       router
       background-color="transparent"
-      text-color="#cbd5e1"
-      active-text-color="#ffffff"
+      text-color="var(--t2v-text-secondary)"
+      active-text-color="var(--t2v-color-primary)"
     >
       <el-menu-item v-for="item in items" :key="item.path" :index="item.path">
         <el-icon><component :is="item.icon" /></el-icon>
@@ -70,8 +70,12 @@ const appTitle = import.meta.env.VITE_APP_TITLE || 'Text2Voice Agent'
   width: var(--t2v-sidebar-width);
   display: flex;
   flex-direction: column;
+  /* macOS window chrome: translucent, blurred, hairline separator */
   background: var(--t2v-bg-sidebar);
-  color: var(--t2v-text-inverse);
+  backdrop-filter: var(--t2v-backdrop-blur);
+  -webkit-backdrop-filter: var(--t2v-backdrop-blur);
+  border-right: 1px solid var(--t2v-border-color);
+  color: var(--t2v-text-primary);
   z-index: 20;
   overflow: hidden;
 }
@@ -83,7 +87,7 @@ const appTitle = import.meta.env.VITE_APP_TITLE || 'Text2Voice Agent'
   height: var(--t2v-header-height);
   padding: 0 16px;
   flex: 0 0 auto;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+  border-bottom: 1px solid var(--t2v-border-color);
 }
 
 .app-sidebar__logo {
@@ -92,10 +96,12 @@ const appTitle = import.meta.env.VITE_APP_TITLE || 'Text2Voice Agent'
   justify-content: center;
   width: 32px;
   height: 32px;
-  border-radius: var(--t2v-radius-sm);
-  background: var(--t2v-color-primary);
+  /* iOS app-icon squircle */
+  border-radius: 9px;
+  background: linear-gradient(180deg, var(--t2v-color-primary-hover), var(--t2v-color-primary));
   color: #fff;
   flex: 0 0 auto;
+  box-shadow: var(--t2v-shadow-sm);
 }
 
 .app-sidebar__brand-text {
@@ -106,8 +112,9 @@ const appTitle = import.meta.env.VITE_APP_TITLE || 'Text2Voice Agent'
 
 .app-sidebar__brand-name {
   font-size: 14px;
-  font-weight: 600;
-  color: #fff;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--t2v-text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -122,16 +129,17 @@ const appTitle = import.meta.env.VITE_APP_TITLE || 'Text2Voice Agent'
 .app-sidebar__menu {
   flex: 1 1 auto;
   border-right: none;
-  padding: 10px 8px;
+  padding: 10px 10px;
   overflow-y: auto;
 }
 
 .app-sidebar__menu :deep(.el-menu-item) {
-  height: 42px;
-  line-height: 42px;
-  border-radius: var(--t2v-radius-sm);
-  margin-bottom: 4px;
+  height: 40px;
+  line-height: 40px;
+  border-radius: 8px;
+  margin-bottom: 2px;
   font-size: 14px;
+  font-weight: 500;
 }
 
 .app-sidebar__menu :deep(.el-menu-item:hover) {
@@ -146,7 +154,7 @@ const appTitle = import.meta.env.VITE_APP_TITLE || 'Text2Voice Agent'
 .app-sidebar__footer {
   flex: 0 0 auto;
   padding: 12px 16px;
-  border-top: 1px solid rgba(148, 163, 184, 0.18);
+  border-top: 1px solid var(--t2v-border-color);
 }
 
 .app-sidebar__footer-text {

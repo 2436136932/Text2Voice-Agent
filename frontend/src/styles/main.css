@@ -1,64 +1,144 @@
 /* ==========================================================================
-   Text2Voice Agent — global stylesheet
-   Palette lives in CSS custom properties; no utility framework is used.
+   Text2Voice Agent — Apple-style design system
+   --------------------------------------------------------------------------
+   Structure:
+     1. Design tokens  — light + dark palettes (macOS/SF-inspired)
+     2. Base           — typography, scrollbars, selection
+     3. Primitives     — layout helpers
+     4. Element bridge — EP variables + component reskins
+     5. Theme switch   — [data-theme="dark"] overrides + smooth transition
+   The palette lives entirely in CSS custom properties; every component reads
+   tokens, so switching themes is a single attribute flip on <html>.
    ========================================================================== */
 
+/* ---------------------------------------------------------------------------
+   1. Design tokens — light (default)
+   --------------------------------------------------------------------------- */
 :root {
-  /* Brand */
-  --t2v-color-primary: #4f46e5;
-  --t2v-color-primary-hover: #6366f1;
-  --t2v-color-primary-soft: #eef2ff;
+  /* Brand: Apple system blue */
+  --t2v-color-primary: #007aff;
+  --t2v-color-primary-hover: #0071eb;
+  --t2v-color-primary-soft: rgba(0, 122, 255, 0.12);
 
-  /* Semantic */
-  --t2v-color-success: #10b981;
-  --t2v-color-success-soft: #ecfdf5;
-  --t2v-color-warning: #f59e0b;
-  --t2v-color-warning-soft: #fffbeb;
-  --t2v-color-danger: #ef4444;
-  --t2v-color-danger-soft: #fef2f2;
-  --t2v-color-info: #64748b;
-  --t2v-color-info-soft: #f1f5f9;
+  /* Semantic — Apple system colors */
+  --t2v-color-success: #34c759;
+  --t2v-color-success-soft: rgba(52, 199, 89, 0.14);
+  --t2v-color-warning: #ff9f0a;
+  --t2v-color-warning-soft: rgba(255, 159, 10, 0.14);
+  --t2v-color-danger: #ff3b30;
+  --t2v-color-danger-soft: rgba(255, 59, 48, 0.12);
+  --t2v-color-info: #8e8e93;
+  --t2v-color-info-soft: rgba(142, 142, 147, 0.12);
 
   /* Surfaces */
-  --t2v-bg-page: #f5f7fb;
+  --t2v-bg-page: #f5f5f7;
   --t2v-bg-surface: #ffffff;
-  --t2v-bg-muted: #f8fafc;
-  --t2v-bg-sidebar: #1e293b;
-  --t2v-bg-sidebar-active: #312e81;
-  --t2v-bg-sidebar-hover: #293548;
+  --t2v-bg-muted: #f5f5f7;
+  /* Sidebar: translucent glass over the wallpaper-like page */
+  --t2v-bg-sidebar: rgba(245, 245, 247, 0.78);
+  --t2v-bg-sidebar-active: rgba(0, 122, 255, 0.14);
+  --t2v-bg-sidebar-hover: rgba(0, 0, 0, 0.05);
 
-  /* Text */
-  --t2v-text-primary: #0f172a;
-  --t2v-text-secondary: #475569;
-  --t2v-text-muted: #94a3b8;
-  --t2v-text-inverse: #f8fafc;
+  /* Text — Apple label colors */
+  --t2v-text-primary: #1d1d1f;
+  --t2v-text-secondary: #6e6e73;
+  --t2v-text-muted: #aeaeb2;
+  --t2v-text-inverse: #ffffff;
 
-  /* Borders */
-  --t2v-border-color: #e2e8f0;
-  --t2v-border-color-strong: #cbd5e1;
+  /* Borders & separators */
+  --t2v-border-color: rgba(0, 0, 0, 0.08);
+  --t2v-border-color-strong: rgba(0, 0, 0, 0.16);
 
   /* Layout */
-  --t2v-sidebar-width: 220px;
+  --t2v-sidebar-width: 224px;
   --t2v-header-height: 60px;
-  --t2v-content-padding: 20px;
+  --t2v-content-padding: 22px;
 
-  /* Shape & motion */
-  --t2v-radius-sm: 6px;
-  --t2v-radius-md: 10px;
-  --t2v-radius-lg: 14px;
-  --t2v-shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06);
-  --t2v-shadow-md: 0 4px 14px rgba(15, 23, 42, 0.08);
-  --t2v-transition: 0.2s ease;
+  /* Shape & motion — Apple uses generous radii and springy easing */
+  --t2v-radius-sm: 8px;
+  --t2v-radius-md: 12px;
+  --t2v-radius-lg: 18px;
+  --t2v-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04), 0 0 0 0.5px rgba(0, 0, 0, 0.04);
+  --t2v-shadow-md: 0 8px 24px rgba(0, 0, 0, 0.1), 0 2px 6px rgba(0, 0, 0, 0.05);
+  --t2v-shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.14), 0 4px 12px rgba(0, 0, 0, 0.06);
+  --t2v-transition: 0.25s cubic-bezier(0.25, 0.1, 0.25, 1);
+  --t2v-backdrop-blur: saturate(180%) blur(20px);
 
   /* Element Plus bridge */
   --el-color-primary: var(--t2v-color-primary);
   --el-color-success: var(--t2v-color-success);
   --el-color-warning: var(--t2v-color-warning);
   --el-color-danger: var(--t2v-color-danger);
+  --el-color-info: var(--t2v-color-info);
   --el-border-radius-base: var(--t2v-radius-sm);
   --el-font-family: inherit;
+  --el-bg-color: var(--t2v-bg-surface);
+  --el-bg-color-page: var(--t2v-bg-page);
+  --el-fill-color-blank: var(--t2v-bg-surface);
+  --el-text-color-primary: var(--t2v-text-primary);
+  --el-text-color-regular: var(--t2v-text-secondary);
+  --el-border-color: var(--t2v-border-color);
+  --el-border-color-light: var(--t2v-border-color);
+  --el-border-color-lighter: var(--t2v-border-color);
 }
 
+/* ---------------------------------------------------------------------------
+   Theme: dark. Mirrors macOS dark mode surfaces (true dark, not gray-on-gray)
+   --------------------------------------------------------------------------- */
+[data-theme="dark"] {
+  --t2v-color-primary: #0a84ff;
+  --t2v-color-primary-hover: #409cff;
+  --t2v-color-primary-soft: rgba(10, 132, 255, 0.22);
+
+  --t2v-color-success: #30d158;
+  --t2v-color-success-soft: rgba(48, 209, 88, 0.2);
+  --t2v-color-warning: #ffd60a;
+  --t2v-color-warning-soft: rgba(255, 214, 10, 0.18);
+  --t2v-color-danger: #ff453a;
+  --t2v-color-danger-soft: rgba(255, 69, 58, 0.2);
+  --t2v-color-info: #98989d;
+  --t2v-color-info-soft: rgba(152, 152, 157, 0.2);
+
+  --t2v-bg-page: #1c1c1e;
+  --t2v-bg-surface: #2c2c2e;
+  --t2v-bg-muted: #232325;
+  --t2v-bg-sidebar: rgba(28, 28, 30, 0.72);
+  --t2v-bg-sidebar-active: rgba(10, 132, 255, 0.28);
+  --t2v-bg-sidebar-hover: rgba(255, 255, 255, 0.07);
+
+  --t2v-text-primary: #f5f5f7;
+  --t2v-text-secondary: #a1a1a6;
+  --t2v-text-muted: #6e6e73;
+  --t2v-text-inverse: #1d1d1f;
+
+  --t2v-border-color: rgba(255, 255, 255, 0.1);
+  --t2v-border-color-strong: rgba(255, 255, 255, 0.18);
+
+  --t2v-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3), 0 0 0 0.5px rgba(255, 255, 255, 0.06);
+  --t2v-shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.3);
+  --t2v-shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.55), 0 4px 12px rgba(0, 0, 0, 0.35);
+
+  color-scheme: dark;
+}
+
+/* Smooth theme transition without janking scrollbars */
+html.theme-switching,
+html.theme-switching * {
+  transition: background-color 0.35s ease, color 0.35s ease,
+    border-color 0.35s ease, box-shadow 0.35s ease !important;
+}
+
+/* Respect reduced-motion: skip the theme fade */
+@media (prefers-reduced-motion: reduce) {
+  html.theme-switching,
+  html.theme-switching * {
+    transition: none !important;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   2. Base
+   --------------------------------------------------------------------------- */
 * {
   box-sizing: border-box;
 }
@@ -74,22 +154,21 @@ body,
 body {
   background-color: var(--t2v-bg-page);
   color: var(--t2v-text-primary);
-  font-family: 'Inter', 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', system-ui,
-    -apple-system, sans-serif;
+  /* SF font stack: real SF on Apple devices, closest metric match elsewhere */
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display',
+    'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', system-ui, sans-serif;
   font-size: 14px;
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  transition: background-color var(--t2v-transition);
 }
 
-h1,
-h2,
-h3,
-h4,
-h5,
-h6 {
+h1, h2, h3, h4, h5, h6 {
   margin: 0;
-  font-weight: 600;
+  /* Headings use the display cut and tighter tracking, like macOS */
+  font-weight: 700;
+  letter-spacing: -0.01em;
   color: var(--t2v-text-primary);
 }
 
@@ -106,19 +185,18 @@ a:hover {
   color: var(--t2v-color-primary-hover);
 }
 
-code,
-kbd,
-pre {
-  font-family: 'JetBrains Mono', 'Cascadia Code', Consolas, 'Courier New', monospace;
+code, kbd, pre {
+  font-family: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
 }
 
-/* --------------------------------------------------------------------------
-   Scrollbars
-   -------------------------------------------------------------------------- */
+::selection {
+  background: var(--t2v-color-primary-soft);
+}
 
+/* Scrollbars: macOS overlay style — slim, auto-hiding thumb */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 9px;
+  height: 9px;
 }
 
 ::-webkit-scrollbar-track {
@@ -127,17 +205,20 @@ pre {
 
 ::-webkit-scrollbar-thumb {
   background: var(--t2v-border-color-strong);
-  border-radius: 4px;
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: content-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--t2v-text-muted);
+  border: 2px solid transparent;
+  background-clip: content-box;
 }
 
-/* --------------------------------------------------------------------------
-   Layout primitives
-   -------------------------------------------------------------------------- */
-
+/* ---------------------------------------------------------------------------
+   3. Layout primitives
+   --------------------------------------------------------------------------- */
 .t2v-page {
   display: flex;
   flex-direction: column;
@@ -156,7 +237,7 @@ pre {
 }
 
 .t2v-page__title h2 {
-  font-size: 18px;
+  font-size: 22px;
 }
 
 .t2v-page__subtitle {
@@ -197,7 +278,7 @@ pre {
 }
 
 .t2v-mono {
-  font-family: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   font-size: 12px;
 }
 
@@ -231,24 +312,39 @@ pre {
   color: var(--t2v-text-secondary);
 }
 
-/* --------------------------------------------------------------------------
-   Element Plus tweaks
-   -------------------------------------------------------------------------- */
-
+/* ---------------------------------------------------------------------------
+   4. Element bridge — soften EP components toward Apple's look
+   --------------------------------------------------------------------------- */
 .el-card {
-  border-radius: var(--t2v-radius-md);
-  border-color: var(--t2v-border-color);
+  border-radius: var(--t2v-radius-lg) !important;
+  border: 1px solid var(--t2v-border-color) !important;
   box-shadow: var(--t2v-shadow-sm) !important;
+  transition: box-shadow var(--t2v-transition), border-color var(--t2v-transition);
+}
+
+.el-card:hover {
+  box-shadow: var(--t2v-shadow-md) !important;
 }
 
 .el-card__header {
-  padding: 14px 18px;
+  padding: 15px 20px;
   border-bottom: 1px solid var(--t2v-border-color);
   font-weight: 600;
 }
 
 .el-card__body {
-  padding: 18px;
+  padding: 20px;
+}
+
+.el-button {
+  border-radius: var(--t2v-radius-sm);
+  font-weight: 500;
+  transition: transform 0.12s ease, box-shadow var(--t2v-transition);
+}
+
+/* Subtle press-in on primary actions, like iOS buttons */
+.el-button--primary:not(.is-disabled):active {
+  transform: scale(0.97);
 }
 
 .el-form-item__label {
@@ -258,6 +354,13 @@ pre {
 
 .el-descriptions__label {
   color: var(--t2v-text-secondary);
+}
+
+.el-table {
+  --el-table-border-color: var(--t2v-border-color);
+  --el-table-header-bg-color: var(--t2v-bg-muted);
+  border-radius: var(--t2v-radius-md);
+  overflow: hidden;
 }
 
 .el-table th.el-table__cell {
@@ -274,10 +377,65 @@ pre {
   color: var(--t2v-text-primary);
 }
 
-/* --------------------------------------------------------------------------
-   Responsive: comfortable down to 1024px
-   -------------------------------------------------------------------------- */
+/* Dialogs & drawers float on the large radius + deep shadow */
+.el-dialog, .el-drawer, .el-message-box {
+  border-radius: var(--t2v-radius-lg) !important;
+  box-shadow: var(--t2v-shadow-lg) !important;
+}
 
+.el-message {
+  border-radius: 999px !important;
+  box-shadow: var(--t2v-shadow-md) !important;
+  border: 1px solid var(--t2v-border-color) !important;
+}
+
+/* Tag pills read better fully rounded */
+.el-tag {
+  border-radius: 999px;
+  border: none;
+}
+
+/* Inputs: quieter borders, focus ring in system blue */
+.el-input__wrapper, .el-textarea__inner {
+  border-radius: var(--t2v-radius-sm);
+}
+
+.el-input__wrapper.is-focus {
+  box-shadow: 0 0 0 3px var(--t2v-color-primary-soft) !important;
+}
+
+/* Segmented control (mode switcher): EP hard-codes white button fills which
+   vanish against dark cards. Both themes get a hairline border + surface
+   fill; the checked segment keeps the system-blue accent. */
+.el-radio-button__inner {
+  background: var(--t2v-bg-surface);
+  color: var(--t2v-text-primary);
+  border-color: var(--t2v-border-color) !important;
+  font-weight: 500;
+}
+
+.el-radio-button:first-child .el-radio-button__inner {
+  border-radius: var(--t2v-radius-sm) 0 0 var(--t2v-radius-sm);
+}
+
+.el-radio-button:last-child .el-radio-button__inner {
+  border-radius: 0 var(--t2v-radius-sm) var(--t2v-radius-sm) 0;
+}
+
+.el-radio-button.is-active .el-radio-button__inner {
+  background: var(--t2v-color-primary);
+  color: #fff;
+}
+
+/* Body must follow the theme token directly — the app shell covers most of
+   it, but overscroll/elastic areas would otherwise flash light in dark mode. */
+body {
+  background-color: var(--t2v-bg-page);
+}
+
+/* ---------------------------------------------------------------------------
+   5. Responsive: comfortable down to 1024px
+   --------------------------------------------------------------------------- */
 @media (max-width: 1280px) {
   .t2v-grid--3 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -286,8 +444,8 @@ pre {
 
 @media (max-width: 1024px) {
   :root {
-    --t2v-sidebar-width: 180px;
-    --t2v-content-padding: 14px;
+    --t2v-sidebar-width: 188px;
+    --t2v-content-padding: 16px;
   }
 
   .t2v-grid--2,
