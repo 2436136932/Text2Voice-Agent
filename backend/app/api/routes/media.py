@@ -27,6 +27,8 @@ from app.api.deps import RateLimitDefault, RateLimitGenerate
 from app.core.errors import AppError, ErrorCode
 from app.core.logging import get_logger
 from app.schemas.generation import (
+    MediaEnhanceRequest,
+    MediaEnhanceResponse,
     MediaInspectResponse,
     MediaTrimRequest,
     MediaTrimResponse,
@@ -34,6 +36,7 @@ from app.schemas.generation import (
 from app.services.media import (
     MAX_TRIM_WINDOW_MS,
     accepted_extensions,
+    enhance_media,
     inspect_upload,
     media_store,
     trim_media,
@@ -123,6 +126,41 @@ async def trim(
         duration_ms=record.duration_ms,
         size_bytes=record.size_bytes,
         format=record.format,
+    )
+
+
+@router.post(
+    "/enhance",
+    response_model=MediaEnhanceResponse,
+    summary="优化参考音频（响度归一化 + 静音裁剪）",
+    description=(
+        "对一段参考音频做**克隆友好**的清理，输出新的 24 kHz 单声道 WAV：\n\n"
+        "* 去除首尾静音（低于 -50 dB 的片段）——静音会让克隆音色出现呼吸声/断句异常；\n"
+        "* EBU R128 响度归一化到 -16 LUFS——过轻/过响的素材都会劣化克隆效果；\n"
+        "* 重采样到 24 kHz 单声道（与主流克隆接口的原生采样率一致）。\n\n"
+        "返回一个**新的** `media_id`，原文件不变；`warnings` 中是非致命提示"
+        "（例如“优化后不足 1 秒”）。依赖 ffmpeg，未安装返回 422。"
+    ),
+    responses={
+        200: {"description": "优化成功"},
+        404: {"description": "源媒体不存在（MEDIA_NOT_FOUND）"},
+        422: {"description": "缺少 ffmpeg 或素材不可用（MEDIA_TRIM_UNSUPPORTED / MEDIA_INVALID_RANGE）"},
+        429: {"description": "触发限流"},
+    },
+)
+async def enhance(
+    payload: MediaEnhanceRequest,
+    _: RateLimitGenerate,
+) -> MediaEnhanceResponse:
+    logger.info("media enhance media_id=%s", payload.media_id)
+    record = enhance_media(payload.media_id)
+    return MediaEnhanceResponse(
+        media_id=record.media_id,
+        preview_url=record.preview_url,
+        duration_ms=record.duration_ms,
+        size_bytes=record.size_bytes,
+        format=record.format,
+        warnings=record.warnings,
     )
 
 

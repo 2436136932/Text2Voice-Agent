@@ -632,3 +632,136 @@ def trim_media(media_id: str, start_ms: int, end_ms: int) -> MediaRecord:
         source_media_id=record.media_id,
     )
     return new_record
+
+
+def _enhance_with_ffmpeg(source: Path) -> tuple[bytes, list[str]]:
+    """Loudness-normalize + silence-trim a reference clip into a WAV.
+
+    Cloning quality depends heavily on the reference: vendors recommend a
+    clean, consistently-loud mono sample (GPT-SoVITS ships a whole pipeline
+    for this). The light version that fits here without extra dependencies:
+
+    * ``loudnorm`` (EBU R128, two-pass is overkill for a short clip) — lifts
+      quiet uploads and tames loud ones to a uniform -16 LUFS;
+    * ``silenceremove`` — strips leading/trailing silence that otherwise
+      becomes dead air (or worse, cloned breath) in the cloned voice;
+    * resample to ``CLONE_SAMPLE_RATE`` mono, same as :meth:`_trim_with_ffmpeg`.
+
+    Returns ``(wav_bytes, warnings)``; non-fatal anomalies are reported in
+    ``warnings`` so the UI can show them next to the clip.
+    """
+    status = ffmpeg_status()
+    if not status.available or not status.path:
+        raise AppError(
+            ErrorCode.MEDIA_TRIM_UNSUPPORTED,
+            f"当前环境未安装 ffmpeg，无法优化 .{source.suffix.lstrip('.')} 文件。",
+            detail={
+                "install_hint": INSTALL_HINT,
+                "suggestion": f"优化（响度归一化/静音裁剪）需要 ffmpeg：{INSTALL_HINT}；"
+                "也可以直接使用未优化的裁剪结果。",
+            },
+        )
+
+    import tempfile
+
+    warnings: list[str] = []
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
+        output = Path(handle.name)
+
+    try:
+        completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            [
+                status.path,
+                "-y",
+                "-loglevel", "error",
+                "-i", str(source),
+                "-vn",
+                "-acodec", "pcm_s16le",
+                "-ar", str(CLONE_SAMPLE_RATE),
+                "-ac", "1",
+                # Silence trim, portable across ffmpeg versions: cut the head,
+                # reverse, cut the (original) tail the same way, reverse back.
+                # The stop_periods= syntax behaves differently between builds,
+                # but "trim head" is stable everywhere.
+                "-af", (
+                    "silenceremove="
+                    "start_periods=1:start_threshold=-50dB:start_silence=0.15,"
+                    "areverse,"
+                    "silenceremove="
+                    "start_periods=1:start_threshold=-50dB:start_silence=0.15,"
+                    "areverse,"
+                    "loudnorm=I=-16:TP=-1.5:LRA=11"
+                ),
+                str(output),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        if completed.returncode != 0 or not output.is_file():
+            logger.error(
+                "ffmpeg enhance failed rc=%s stderr=%s",
+                completed.returncode, completed.stderr[:400],
+            )
+            raise AppError(
+                ErrorCode.MEDIA_TRIM_UNSUPPORTED,
+                "优化失败：ffmpeg 无法处理该文件。",
+                detail={"suggestion": "请尝试换一段更干净的参考音频，或先裁剪出目标片段。"},
+            )
+        data = output.read_bytes()
+    finally:
+        output.unlink(missing_ok=True)
+
+    if not data:
+        raise AppError(
+            ErrorCode.MEDIA_TRIM_UNSUPPORTED,
+            "优化后的音频为空——这段素材可能几乎全是静音。",
+            detail={"suggestion": "请选择一段包含清晰人声的片段后重试。"},
+        )
+
+    probed = probe_wav(data)
+    record_ms = probed["duration_ms"]
+    if record_ms is not None and record_ms < 1000:
+        warnings.append("优化后不足 1 秒：静音裁剪可能去掉了大部分内容，建议检查片段。")
+    return data, warnings
+
+
+def enhance_media(media_id: str) -> MediaRecord:
+    """Produce a cleaned (normalized + silence-trimmed) copy of a reference clip.
+
+    Same contract as :meth:`trim_media`: the source is untouched and a **new**
+    ``media_id`` is returned, so the UI can preview both and let the user pick.
+    """
+    record = media_store.load(media_id)
+    data = media_store.read_bytes(record)
+    probed_source = probe_wav(data) if record.extension in NATIVE_TRIM_FORMATS else {}
+
+    enhanced, warnings = _enhance_with_ffmpeg(media_store.path_for(record))
+    probed = probe_wav(enhanced)
+    duration_ms = probed["duration_ms"]
+
+    # Refuse results that are too short to clone from — better than letting
+    # the vendor return garbage audio or an inscrutable error.
+    if duration_ms is not None and duration_ms < 1000:
+        raise AppError(
+            ErrorCode.MEDIA_INVALID_RANGE,
+            "优化后的片段不足 1 秒，无法用于声音克隆。",
+            detail={
+                "duration_ms": duration_ms,
+                "suggestion": "静音裁剪去掉了过多内容；请选择一段人声更连续的片段。",
+            },
+        )
+
+    return media_store.save(
+        data=enhanced,
+        filename=f"enhanced_{Path(record.filename).stem}.wav",
+        extension="wav",
+        kind="audio",
+        content_type="audio/wav",
+        duration_ms=duration_ms,
+        sample_rate=probed.get("sample_rate") or CLONE_SAMPLE_RATE,
+        channels=1,
+        warnings=[*warnings, *probed_source.get("warnings", [])] if isinstance(probed_source, dict) else warnings,
+        source_media_id=record.media_id,
+    )

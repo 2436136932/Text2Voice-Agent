@@ -503,6 +503,22 @@ class MediaTrimResponse(BaseModel):
     format: str = "wav"
 
 
+class MediaEnhanceRequest(BaseSchema):
+    """Body of ``POST /media/enhance``."""
+
+    media_id: str = Field(min_length=1, max_length=64)
+
+
+class MediaEnhanceResponse(BaseModel):
+    media_id: str
+    preview_url: str
+    duration_ms: int | None = None
+    size_bytes: int = 0
+    format: str = "wav"
+    #: Non-fatal notes ("optimized clip is very short", ...) shown in the UI.
+    warnings: list[str] = Field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # Voice cloning
 # ---------------------------------------------------------------------------
