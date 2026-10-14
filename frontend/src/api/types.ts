@@ -167,6 +167,17 @@ export interface TrimMediaResponse {
   format: string
 }
 
+/** `POST /media/enhance` — cleaned reference clip (new media id). */
+export interface EnhanceMediaResponse {
+  media_id: string
+  preview_url: string
+  duration_ms: number | null
+  size_bytes: number
+  format: string
+  /** Non-fatal notes, e.g. "the optimized clip is under 1 second". */
+  warnings: string[]
+}
+
 /* ------------------------------------------------------------------ */
 /* Cloned voices                                                       */
 /* ------------------------------------------------------------------ */

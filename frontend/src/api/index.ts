@@ -11,6 +11,7 @@ import type {
   DebugCaptureResponse,
   DeleteHistoryBulkRequest,
   DeleteHistoryBulkResponse,
+  EnhanceMediaResponse,
   FetchModelsRequest,
   FetchModelsResponse,
   GenerateRequest,
@@ -116,6 +117,14 @@ export async function inspectMedia(file: File, onProgress?: (percent: number) =>
 /** `POST /media/trim` — cut a window out of an uploaded file. */
 export function trimMedia(payload: TrimMediaRequest): Promise<TrimMediaResponse> {
   return post<TrimMediaResponse>('/media/trim', payload)
+}
+
+/**
+ * `POST /media/enhance` — produce a clone-friendly copy of a reference clip
+ * (silence trimmed, loudness normalized). Returns a NEW media id.
+ */
+export function enhanceMedia(mediaId: string): Promise<EnhanceMediaResponse> {
+  return post<EnhanceMediaResponse>('/media/enhance', { media_id: mediaId })
 }
 
 /** `DELETE /media/{id}` — discard an uploaded file. */

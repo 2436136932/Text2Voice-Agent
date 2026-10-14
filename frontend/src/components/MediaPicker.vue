@@ -11,9 +11,9 @@
  * backend has accepted the file, so the parent owns the lifecycle.
  */
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { Delete, Download, RefreshRight, Scissor, UploadFilled, VideoPlay } from '@element-plus/icons-vue'
+import { Delete, Download, MagicStick, RefreshRight, Scissor, UploadFilled, VideoPlay } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { deleteMedia, inspectMedia, mediaUrl, trimMedia } from '@/api'
+import { deleteMedia, enhanceMedia, inspectMedia, mediaUrl, trimMedia } from '@/api'
 import { ApiError } from '@/api/http'
 import type { MediaInfo } from '@/api/types'
 import { formatBytes, formatDuration } from '@/utils/format'
@@ -52,6 +52,7 @@ const emit = defineEmits<{
 const uploading = ref(false)
 const uploadPercent = ref(0)
 const trimming = ref(false)
+const enhancing = ref(false)
 const dragActive = ref(false)
 const info = ref<MediaInfo | null>(props.media ?? null)
 const localError = ref<string | null>(null)
@@ -355,6 +356,49 @@ async function restoreOriginal(): Promise<void> {
   resetTrim()
 }
 
+/**
+ * Produce a clone-friendly copy of the current clip: leading/trailing silence
+ * trimmed and loudness normalized to -16 LUFS. The backend returns a NEW
+ * media id, so the original stays available via 恢复原文件.
+ */
+async function applyEnhance(): Promise<void> {
+  if (!info.value) return
+  enhancing.value = true
+  try {
+    const result = await enhanceMedia(info.value.media_id)
+    const updated: MediaInfo = {
+      ...info.value,
+      media_id: result.media_id,
+      preview_url: result.preview_url,
+      duration_ms: result.duration_ms,
+      size_bytes: result.size_bytes,
+      format: result.format,
+      content_type: 'audio/wav',
+      kind: 'audio',
+      trimmable: true,
+      sample_rate: 24000,
+      channels: 1,
+      filename: `enhanced_${result.media_id.slice(0, 8)}.wav`,
+      warnings: result.warnings ?? [],
+    }
+    info.value = updated
+    emit('update:mediaId', updated.media_id)
+    emit('update:media', updated)
+    // Rebind the trim selection to the shortened clip.
+    trimStart.value = 0
+    trimEnd.value = result.duration_ms ?? 0
+    if (result.warnings && result.warnings.length > 0) {
+      ElMessage.warning(result.warnings.join('；'))
+    } else {
+      ElMessage.success(`优化完成（${formatDuration(updated.duration_ms)}）`)
+    }
+  } catch (error) {
+    showError(error, '优化失败')
+  } finally {
+    enhancing.value = false
+  }
+}
+
 /* -------------------------------- upload -------------------------------- */
 
 async function handleFile(file: File): Promise<void> {
@@ -639,6 +683,17 @@ const isVideo = computed<boolean>(() => info.value?.kind === 'video')
           <el-button size="small" :icon="Scissor" :loading="trimming" @click="applyTrim">
             应用裁剪
           </el-button>
+          <el-button
+            size="small"
+            type="primary"
+            plain
+            :icon="MagicStick"
+            :loading="enhancing"
+            :disabled="durationMs <= 0"
+            @click="applyEnhance"
+          >
+            优化音色
+          </el-button>
           <el-button size="small" :icon="VideoPlay" @click="previewSelection">
             试听选中片段
           </el-button>
@@ -651,6 +706,11 @@ const isVideo = computed<boolean>(() => info.value?.kind === 'video')
           >
             恢复原文件
           </el-button>
+        </div>
+
+        <div class="media-picker__enhance-hint t2v-muted">
+          优化会去掉首尾静音并把响度统一到 -16 LUFS，克隆出的音色更干净；
+          返回一个新片段，原文件保留。
         </div>
       </div>
 
@@ -831,6 +891,12 @@ const isVideo = computed<boolean>(() => info.value?.kind === 'video')
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.media-picker__enhance-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .media-picker__no-trim,
