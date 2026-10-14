@@ -19,6 +19,7 @@ from app.schemas.generation import (
     HealthResponse,
     MetricsResponse,
 )
+from app.services.history import history_service
 from app.services.metrics import metrics
 from app.services.tasks import task_manager
 
@@ -142,6 +143,24 @@ async def metrics_endpoint() -> MetricsResponse:
     snapshot = metrics.snapshot()
     snapshot["active_tasks"] = task_manager.active_count()
     return MetricsResponse(**snapshot)
+
+
+@router.get(
+    "/meta/usage",
+    summary="用量统计",
+    description=(
+        "按维度聚合生成记录的 token / 音频用量（仅统计成功记录）。\n\n"
+        "`days` 时间窗口（默认 30 天），`group_by` 分组维度："
+        "`llm_provider` / `llm_model` / `tts_provider` / `tts_voice` / `day`。"
+    ),
+    tags=["元信息 Meta"],
+)
+async def usage_stats(
+    session: SessionDep,
+    days: int = 30,
+    group_by: str = "llm_provider",
+) -> dict:
+    return await history_service.usage(session, days=days, group_by=group_by)
 
 
 @router.get(

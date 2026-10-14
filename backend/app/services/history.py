@@ -183,6 +183,83 @@ class HistoryService:
             "audio_bytes": audio_store.total_bytes(),
         }
 
+    async def usage(
+        self,
+        session: AsyncSession,
+        *,
+        days: int = 30,
+        group_by: str = "llm_provider",
+    ) -> dict[str, Any]:
+        """Token/cost-oriented aggregation for the usage dashboard.
+
+        Sums the per-row usage columns over the window and groups by one of
+        the record dimensions. Token data is stored on every row already;
+        this endpoint is the missing read side.
+        """
+        allowed = {"llm_provider", "llm_model", "tts_provider", "tts_voice", "day"}
+        if group_by not in allowed:
+            raise AppError(
+                ErrorCode.VALIDATION_ERROR,
+                f"不支持的分组维度 “{group_by}”，可用：{', '.join(sorted(allowed))}。",
+                detail={"group_by": group_by, "supported": sorted(allowed)},
+                http_status=400,
+            )
+
+        window_start = datetime.now(timezone.utc) - timedelta(days=max(1, days))
+
+        def _column(name: str):  # noqa: ANN202 - tiny local mapper
+            if name == "day":
+                return func.date(GenerationRecord.created_at)
+            return getattr(GenerationRecord, name)
+
+        group_col = _column(group_by)
+        rows = (
+            await session.execute(
+                select(
+                    group_col.label("group"),
+                    func.count().label("generations"),
+                    func.coalesce(func.sum(GenerationRecord.prompt_tokens), 0).label("prompt_tokens"),
+                    func.coalesce(func.sum(GenerationRecord.completion_tokens), 0).label("completion_tokens"),
+                    func.coalesce(func.sum(GenerationRecord.total_tokens), 0).label("total_tokens"),
+                    func.coalesce(func.sum(GenerationRecord.duration_ms), 0).label("audio_ms"),
+                    func.coalesce(func.sum(GenerationRecord.audio_bytes), 0).label("audio_bytes"),
+                    func.coalesce(func.sum(GenerationRecord.llm_latency_ms), 0).label("llm_ms"),
+                    func.coalesce(func.sum(GenerationRecord.tts_latency_ms), 0).label("tts_ms"),
+                )
+                .where(
+                    GenerationRecord.created_at >= window_start,
+                    GenerationRecord.status == "succeeded",
+                )
+                .group_by(group_col)
+                .order_by(group_col)
+            )
+        ).all()
+
+        items = [
+            {
+                "group": str(row.group) if row.group is not None else "—",
+                "generations": int(row.generations),
+                "prompt_tokens": int(row.prompt_tokens),
+                "completion_tokens": int(row.completion_tokens),
+                "total_tokens": int(row.total_tokens),
+                "audio_ms": int(row.audio_ms),
+                "audio_bytes": int(row.audio_bytes),
+                "llm_ms": int(row.llm_ms),
+                "tts_ms": int(row.tts_ms),
+            }
+            for row in rows
+        ]
+        return {
+            "days": days,
+            "group_by": group_by,
+            "items": items,
+            "totals": {
+                "generations": sum(item["generations"] for item in items),
+                "total_tokens": sum(item["total_tokens"] for item in items),
+                "audio_bytes": sum(item["audio_bytes"] for item in items),
+            },
+        }
+
     async def export_csv(self, session: AsyncSession, *, limit: int = 5000) -> str:
         """Export the history as CSV (text fields escaped by the csv module)."""
         rows = (
