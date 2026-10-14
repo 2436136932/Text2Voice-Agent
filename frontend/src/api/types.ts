@@ -422,6 +422,7 @@ export interface HistoryItem {
   llm_model: string
   tts_provider: string
   tts_voice: string
+  tts_model: string
   audio_format: string
   audio_bytes: number | null
   duration_ms: number | null

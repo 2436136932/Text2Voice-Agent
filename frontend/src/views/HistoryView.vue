@@ -4,17 +4,86 @@
  * (so only one track plays at a time), bulk deletion and a detail drawer.
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { Delete, Download, Headset, Refresh, Search, View } from '@element-plus/icons-vue'
+import { Delete, Download, Headset, MagicStick, Refresh, Search, View } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useRouter } from 'vue-router'
 import AudioPlayer from '@/components/AudioPlayer.vue'
 import ErrorAlert from '@/components/ErrorAlert.vue'
 import { ApiError } from '@/api/http'
 import { audioUrl, deleteHistoryItem, fetchHistoryDetail } from '@/api'
 import type { HistoryDetail, HistoryItem, TaskStatus } from '@/api/types'
 import { useHistoryStore } from '@/stores/history'
+import { useConfigStore } from '@/stores/config'
 import { formatBytes, formatDateTime, formatSeconds, statusLabel, statusTagType, truncate } from '@/utils/format'
+import { saveBlobAs } from '@/utils/download'
+import { zip } from 'fflate'
 
 const historyStore = useHistoryStore()
+const configStore = useConfigStore()
+const router = useRouter()
+
+/**
+ * Fork a past generation back into the generate page: every parameter that
+ * shaped the original run (providers, model, voice, speed, format, mode and
+ * the text) is pushed into the config store, so "make a small change and
+ * regenerate" is one click instead of retyping everything.
+ */
+function reuseConfig(row: HistoryItem): void {
+  configStore.llmProviderId = row.llm_provider || configStore.llmProviderId
+  if (row.llm_model) configStore.llmModel = row.llm_model
+  configStore.ttsProviderId = row.tts_provider || configStore.ttsProviderId
+  if (row.tts_voice) configStore.ttsVoice = row.tts_voice
+  if (row.tts_model) configStore.ttsModel = row.tts_model
+  if (row.audio_format) configStore.format = row.audio_format
+  // The input text is what the user wants to tweak; the reply is available in
+  // the drawer if they want the voiced version instead.
+  configStore.text = row.input_text
+  void router.push('/generate')
+  ElMessage.success('已载入该记录的配置，可修改后重新生成')
+}
+
+/* --------------------------- ZIP batch download -------------------------- */
+
+const zipping = ref(false)
+
+/**
+ * Download all selected rows' audio as a single ZIP, client-side.
+ * Each file is fetched individually, zipped with fflate (~2KB), and saved
+ * via the browser's save-as dialog. File names include the record id so
+ * they sort correctly.
+ */
+async function downloadSelectedAsZip(): Promise<void> {
+  if (selectedIds.value.length === 0) return
+  zipping.value = true
+  try {
+    const rows = historyStore.items.filter((item) => selectedIds.value.includes(item.id))
+    const files: Record<string, Uint8Array> = {}
+    for (const row of rows) {
+      if (!row.audio_url) continue
+      const response = await fetch(row.audio_url)
+      if (!response.ok) continue
+      const buffer = await response.arrayBuffer()
+      const ext = row.audio_format || 'mp3'
+      files[`text2voice-${row.id}.${ext}`] = new Uint8Array(buffer)
+    }
+    if (Object.keys(files).length === 0) {
+      ElMessage.warning('选中的记录没有可下载的音频')
+      return
+    }
+    const zipBytes = await new Promise<Uint8Array>((resolve, reject) => {
+      zip(files, (err, data) => {
+        if (err) reject(err)
+        else resolve(data)
+      })
+    })
+    saveBlobAs(new Blob([zipBytes], { type: 'application/zip' }), `text2voice-audio-${Date.now()}.zip`)
+    ElMessage.success(`已打包 ${Object.keys(files).length} 个音频文件`)
+  } catch (caught) {
+    ElMessage.error(caught instanceof Error ? caught.message : '打包下载失败')
+  } finally {
+    zipping.value = false
+  }
+}
 
 /* -------------------------------- loading -------------------------------- */
 
@@ -303,6 +372,16 @@ watch(drawerVisible, (open) => {
           >
             批量删除{{ selectedIds.length > 0 ? `（${selectedIds.length}）` : '' }}
           </el-button>
+          <el-button
+            type="primary"
+            plain
+            :icon="Download"
+            :disabled="selectedIds.length === 0"
+            :loading="zipping"
+            @click="downloadSelectedAsZip"
+          >
+            打包下载{{ selectedIds.length > 0 ? `（${selectedIds.length}）` : '' }}
+          </el-button>
           <el-button type="danger" plain :icon="Delete" :loading="deleting" @click="removeAll">
             清空全部
           </el-button>
@@ -395,7 +474,7 @@ watch(drawerVisible, (open) => {
           </template>
         </el-table-column>
 
-        <el-table-column label="操作" width="230" fixed="right">
+        <el-table-column label="操作" width="270" fixed="right">
           <template #default="{ row }">
             <div class="history-view__actions">
               <el-tooltip content="播放" placement="top">
@@ -404,6 +483,7 @@ watch(drawerVisible, (open) => {
                   :icon="Headset"
                   circle
                   :disabled="!row.audio_url"
+                  aria-label="播放"
                   @click="playRow(row)"
                 />
               </el-tooltip>
@@ -416,11 +496,23 @@ watch(drawerVisible, (open) => {
                   :href="row.audio_url ? `${row.audio_url}?download=1` : undefined"
                   :download="`text2voice-${row.id}.${row.audio_format || 'mp3'}`"
                   :disabled="!row.audio_url"
+                  aria-label="下载音频"
                   @click="notifyDownload"
                 />
               </el-tooltip>
+              <el-tooltip content="载入此配置到生成页" placement="top">
+                <el-button
+                  size="small"
+                  :icon="MagicStick"
+                  circle
+                  type="primary"
+                  plain
+                  aria-label="复用此配置"
+                  @click="reuseConfig(row)"
+                />
+              </el-tooltip>
               <el-tooltip content="详情" placement="top">
-                <el-button size="small" :icon="View" circle @click="openDetail(row)" />
+                <el-button size="small" :icon="View" circle aria-label="查看详情" @click="openDetail(row)" />
               </el-tooltip>
               <el-tooltip content="删除" placement="top">
                 <el-button
@@ -429,6 +521,7 @@ watch(drawerVisible, (open) => {
                   :icon="Delete"
                   circle
                   plain
+                  aria-label="删除记录"
                   @click="removeRow(row)"
                 />
               </el-tooltip>
@@ -553,6 +646,13 @@ watch(drawerVisible, (open) => {
               title="历史音频"
             />
           </section>
+
+          <div class="history-view__drawer-actions">
+            <el-button type="primary" :icon="MagicStick" @click="reuseConfig(drawerItem)">
+              载入此配置到生成页
+            </el-button>
+            <el-button @click="drawerVisible = false">关闭</el-button>
+          </div>
         </template>
 
         <el-empty v-else-if="!detailLoading && !detailError" description="暂无详情" />
@@ -687,6 +787,14 @@ watch(drawerVisible, (open) => {
   background: var(--t2v-bg-muted);
   border: 1px solid var(--t2v-border-color);
   border-radius: var(--t2v-radius-sm);
+}
+
+.history-view__drawer-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--t2v-border-color);
 }
 
 .t2v-slide-up-enter-active,

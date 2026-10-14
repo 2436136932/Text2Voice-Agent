@@ -53,6 +53,14 @@ interface CachedCredentials {
   ttsVoice?: string
   ttsModel?: string
   ttsSpeechPath?: string
+  /* Per-generation parameters + draft — reloading should not reset them. */
+  temperature?: number
+  maxTokens?: number
+  systemPrompt?: string
+  speed?: number
+  format?: string
+  mode?: GenerationMode
+  text?: string
   savedAt?: string
 }
 
@@ -448,6 +456,16 @@ export const useConfigStore = defineStore('config', {
         ttsVoice: this.ttsVoice,
         ttsModel: this.ttsModel,
         ttsSpeechPath: this.ttsSpeechPath,
+        // Per-generation parameters ride along: a reload resetting the speed/
+        // format/prompt/draft was a daily annoyance — only the keys need the
+        // opt-in gating, these are plain preferences.
+        temperature: this.temperature,
+        maxTokens: this.maxTokens,
+        systemPrompt: this.systemPrompt,
+        speed: this.speed,
+        format: this.format,
+        mode: this.mode,
+        text: this.text,
         savedAt: new Date().toISOString(),
       }
       try {
@@ -483,6 +501,19 @@ export const useConfigStore = defineStore('config', {
         if (typeof parsed.ttsVoice === 'string' && parsed.ttsVoice) this.ttsVoice = parsed.ttsVoice
         if (typeof parsed.ttsModel === 'string') this.ttsModel = parsed.ttsModel
         if (typeof parsed.ttsSpeechPath === 'string') this.ttsSpeechPath = parsed.ttsSpeechPath
+        // Per-generation parameters (guarded types: an older cache may not
+        // carry them, and 0/"" are valid values that must survive).
+        if (typeof parsed.temperature === 'number') this.temperature = parsed.temperature
+        if (typeof parsed.maxTokens === 'number' && parsed.maxTokens > 0) {
+          this.maxTokens = parsed.maxTokens
+        }
+        if (typeof parsed.systemPrompt === 'string') this.systemPrompt = parsed.systemPrompt
+        if (typeof parsed.speed === 'number' && parsed.speed > 0) this.speed = parsed.speed
+        if (typeof parsed.format === 'string' && parsed.format) this.format = parsed.format
+        if (parsed.mode === 'tts' || parsed.mode === 'clone' || parsed.mode === 'text2audio') {
+          this.mode = parsed.mode
+        }
+        if (typeof parsed.text === 'string') this.text = parsed.text
       } catch {
         /* malformed payload — ignore */
       }

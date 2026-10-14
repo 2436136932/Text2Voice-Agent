@@ -38,13 +38,14 @@ for (const [name, component] of Object.entries(ElementPlusIconsVue)) {
  * The user's expectation is "fill it in once and it stays filled" — requiring a
  * separate save action (or a trip to the settings page) meant a key typed on
  * the generate page was silently lost on reload. This watcher closes that gap:
- * any change to a credential or provider selection is written to localStorage
- * immediately (debounced), but only while the user has opted in via
- * 自动保存配置. `autoSaveCredentials` itself is persisted by the settings store.
+ * any change to a credential, provider selection OR per-generation parameter
+ * is written to localStorage immediately (debounced), but only while the user
+ * has opted in via 自动保存配置. `autoSaveCredentials` itself is persisted by
+ * the settings store.
  */
 const configStore = useConfigStore()
 const settingsStore = useSettingsStore()
-const CREDENTIAL_FIELDS = [
+const PERSISTED_FIELDS = [
   'llmApiKey',
   'ttsApiKey',
   'llmBaseUrl',
@@ -55,6 +56,14 @@ const CREDENTIAL_FIELDS = [
   'ttsVoice',
   'ttsModel',
   'ttsSpeechPath',
+  // Per-generation parameters: a reload resetting these was a daily annoyance.
+  'temperature',
+  'maxTokens',
+  'systemPrompt',
+  'speed',
+  'format',
+  'mode',
+  'text',
 ] as const
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null
@@ -65,7 +74,7 @@ configStore.$subscribe(
     // The persisted-plugin mirror loads asynchronously; skip until it is known.
     if (saveTimer !== null) clearTimeout(saveTimer)
     saveTimer = setTimeout(() => {
-      const changed = CREDENTIAL_FIELDS.some((field) => state[field] !== undefined)
+      const changed = PERSISTED_FIELDS.some((field) => state[field] !== undefined)
       if (changed) configStore.persistCredentials()
     }, 400)
   },

@@ -19,9 +19,10 @@ import {
   Link,
   Microphone,
   QuestionFilled,
+  VideoPlay,
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { deleteVoice, fetchDebugCapture, fetchModels, fetchVoices, probePaths, validateProvider } from '@/api'
+import { deleteVoice, fetchDebugCapture, fetchModels, fetchTask, fetchTaskResult, fetchVoices, probePaths, submitTask, validateProvider } from '@/api'
 import { ApiError } from '@/api/http'
 import type {
   ClonedVoice,
@@ -162,6 +163,71 @@ watch(providerId, () => {
 onMounted(() => {
   void loadClonedVoices()
 })
+
+/* --------------------------- voice audition ---------------------------- */
+
+const auditioning = ref(false)
+const auditionUrl = ref<string | null>(null)
+
+/**
+ * Synthesize a short sample with the currently selected voice so the user can
+ * hear it before committing. Uses the real TTS pipeline with auto_save off;
+ * the result audio URL is bound to an <audio controls> element.
+ */
+async function auditionVoice(): Promise<void> {
+  if (!voice.value || !configStore.ttsApiKey) return
+  auditioning.value = true
+  auditionUrl.value = null
+  try {
+    const sampleText = '你好，这是我的声音。愿您逐梦三万里，剑挡百万师。'
+    const submitted = await submitTask({
+      text: sampleText,
+      llm: {
+        provider: configStore.llmProviderId || 'mock',
+        api_key: configStore.llmApiKey || '',
+        model: configStore.llmModel || '',
+        base_url: configStore.llmBaseUrlOrNull,
+        temperature: 0.7,
+        max_tokens: 256,
+        system_prompt: '',
+      },
+      tts: {
+        provider: providerId.value,
+        api_key: configStore.ttsApiKey,
+        voice: voice.value,
+        model: model.value || '',
+        base_url: configStore.ttsBaseUrlOrNull,
+        format: 'mp3',
+        speed: 1.0,
+        extra: {},
+      },
+      options: {
+        auto_save: false,
+        include_audio_base64: false,
+        fallback_enabled: false,
+        reuse_reply_text: sampleText,
+      },
+    })
+    // Poll until terminal, then fetch the result.
+    for (let i = 0; i < 60; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 1500))
+      const status = await fetchTask(submitted.task_id)
+      if (status.status === 'succeeded') {
+        const result = await fetchTaskResult(submitted.task_id)
+        auditionUrl.value = result.audio_url
+        break
+      }
+      if (status.status === 'failed' || status.status === 'canceled') {
+        ElMessage.error('试听失败：' + (status.error?.message || '未知错误'))
+        break
+      }
+    }
+  } catch (error) {
+    ElMessage.error(error instanceof ApiError ? error.message : '试听失败')
+  } finally {
+    auditioning.value = false
+  }
+}
 
 /** Model list for the LLM selector (fetched list wins when present). */
 const modelChoices = computed(() => {
@@ -603,6 +669,24 @@ function reportError(error: unknown, fallback: string): void {
             </el-select>
           </div>
           <div v-if="cloneHint" class="provider-panel__hint">{{ cloneHint }}</div>
+          <div class="provider-panel__audition">
+            <el-button
+              size="small"
+              plain
+              :icon="VideoPlay"
+              :loading="auditioning"
+              :disabled="!voice || !configStore.ttsApiKey"
+              @click="auditionVoice"
+            >
+              试听此音色
+            </el-button>
+            <audio
+              v-if="auditionUrl"
+              :src="auditionUrl"
+              controls
+              class="provider-panel__audition-player"
+            />
+          </div>
         </el-form-item>
 
         <!-- Locally registered clone voices: pick, or delete the stale ones.
@@ -970,6 +1054,21 @@ function reportError(error: unknown, fallback: string): void {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.provider-panel__audition {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+
+.provider-panel__audition-player {
+  height: 36px;
+  flex: 1 1 auto;
+  min-width: 200px;
+  max-width: 400px;
 }
 
 .provider-panel__warn {

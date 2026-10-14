@@ -131,6 +131,23 @@ function seekBy(delta: number): void {
   currentTime.value = target
 }
 
+/* --------------------------- playback rate ------------------------------ */
+
+const SPEEDS = [0.75, 1, 1.25, 1.5, 2] as const
+
+const speedIndex = ref(1) // 1 → 1x
+
+const playbackRate = computed(() => SPEEDS[speedIndex.value] ?? 1)
+
+watch(speedIndex, (index) => {
+  const audio = audioRef.value
+  if (audio) audio.playbackRate = SPEEDS[index] ?? 1
+})
+
+function cycleSpeed(): void {
+  speedIndex.value = (speedIndex.value + 1) % SPEEDS.length
+}
+
 function toggleMute(): void {
   const audio = audioRef.value
   if (!audio) return
@@ -268,6 +285,38 @@ defineExpose({ play, pause, toggle, stop, seekBy })
         <span class="audio-player__time t2v-mono">{{ displayDuration }}</span>
       </div>
 
+      <!-- ±10s skip + speed: wired to the (previously dead) seekBy. -->
+      <div class="audio-player__nudge">
+        <el-button
+          link
+          size="small"
+          :disabled="!src"
+          aria-label="后退 10 秒"
+          @click="seekBy(-10)"
+        >
+          −10s
+        </el-button>
+        <el-button
+          link
+          size="small"
+          :disabled="!src"
+          aria-label="前进 10 秒"
+          @click="seekBy(10)"
+        >
+          +10s
+        </el-button>
+        <el-button
+          link
+          size="small"
+          class="audio-player__speed"
+          :disabled="!src"
+          :aria-label="`播放倍速 ${playbackRate}x`"
+          @click="cycleSpeed"
+        >
+          {{ playbackRate }}x
+        </el-button>
+      </div>
+
       <div v-if="!compact" class="audio-player__volume">
         <el-button
           link
@@ -397,6 +446,18 @@ defineExpose({ play, pause, toggle, stop, seekBy })
   width: 80px;
 }
 
+.audio-player__nudge {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
+.audio-player__speed {
+  min-width: 44px;
+  font-variant-numeric: tabular-nums;
+}
+
 .audio-player__error {
   margin-top: 2px;
 }
@@ -404,6 +465,10 @@ defineExpose({ play, pause, toggle, stop, seekBy })
 @media (max-width: 1024px) {
   .audio-player__volume {
     display: none;
+  }
+  /* Keep the mute available when the slider hides: a compact speed row. */
+  .audio-player__nudge {
+    gap: 6px;
   }
 }
 </style>
