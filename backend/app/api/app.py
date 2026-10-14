@@ -68,10 +68,42 @@ async def _retention_loop() -> None:
             logger.exception("retention job failed")
 
 
+def _assert_single_process() -> None:
+    """Refuse to start when more than one worker process would run.
+
+    The task manager, the rate limiter and the metrics collector all keep
+    their state **in process memory**. With ``--workers N`` each process gets
+    its own copy, which fails in ways that are worse than a crash:
+
+    * a task submitted to worker 1 is invisible to ``GET /tasks/{id}`` served
+      by worker 2 (the client sees a 404 for a task that is really running);
+    * ``restore_from_db`` rehydrates the same "pending" rows in every process,
+      so the same job is executed N times (N vendor calls, N charges);
+    * rate limits silently multiply by N.
+
+    Running single-process is a documented deployment requirement, so enforce
+    it loudly. The supported way to serve more concurrency is to raise
+    ``T2V_TASK_WORKERS`` (in-process asyncio workers), not to add processes.
+    """
+    if settings.workers <= 1:
+        return
+    message = (
+        f"检测到 workers={settings.workers}，但本服务只能以单进程运行："
+        "任务队列、限流器与指标统计均为进程内状态，多进程会导致任务丢失、"
+        "重复执行与限流失效。请把 T2V_WORKERS 设为 1（默认值），"
+        "需要更高并发时改为调大 T2V_TASK_WORKERS（进程内异步 worker 数）。"
+    )
+    logger.critical("refusing to start: %s", message)
+    raise RuntimeError(message)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Startup/shutdown: DB schema, task workers, HTTP pool, retention job."""
     configure_logging()
+    # Enforce the single-process contract before touching any shared state, so
+    # the failure is a clear message instead of duplicated background work.
+    _assert_single_process()
     logger.info(
         "starting %s v%s environment=%s debug=%s",
         settings.app_name, settings.version, settings.environment, settings.debug,
