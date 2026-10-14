@@ -1,0 +1,90 @@
+# Text2Voice Agent — continuous integration.
+#
+# Backend: pytest across the supported Python versions (3.11/3.13). The test
+# suite is fully offline — adapters are exercised against mocks and local
+# HTTP fixtures, no vendor keys are needed, which is why CI can run on every
+# push/PR without secrets.
+#
+# Frontend: vue-tsc typecheck. The build is also run once (3.13 job) so a
+# broken `vite build` fails CI, not a release.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Keep the badge fresh even on quiet repos.
+  schedule:
+    - cron: "0 3 * * 1" # weekly, Monday 03:00 UTC
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: backend tests (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run tests
+        # ffmpeg is NOT installed in CI: the suite must pass with every
+        # ffmpeg-dependent feature either mocked or skipped — that is part
+        # of the contract (local installs report availability via
+        # /capabilities). Keep -p no:warnings to reduce log noise.
+        run: python -m pytest tests/ -q -p no:warnings --tb=short
+
+  frontend:
+    name: frontend typecheck & build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        # ci, not install: package-lock.json is the source of truth.
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist/
+          retention-days: 7
