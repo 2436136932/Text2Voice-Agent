@@ -476,6 +476,48 @@ export interface DeleteHistoryBulkResponse {
   deleted: number
 }
 
+/** `GET /history/stats` — aggregate overview of stored generations. */
+export interface HistoryStats {
+  total: number
+  succeeded: number
+  failed: number
+  total_audio_ms: number
+  audio_files: number
+  audio_bytes: number
+}
+
+/** Dimensions accepted by `GET /meta/usage`'s group_by parameter. */
+export type UsageGroupBy = 'llm_provider' | 'llm_model' | 'tts_provider' | 'tts_voice' | 'day'
+
+export interface UsageQuery {
+  days: number
+  groupBy: UsageGroupBy
+}
+
+export interface UsageItem {
+  group: string
+  generations: number
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  audio_ms: number
+  audio_bytes: number
+  llm_ms: number
+  tts_ms: number
+}
+
+/** `GET /meta/usage` — aggregation rows plus grand totals. */
+export interface UsageResponse {
+  days: number
+  group_by: string
+  items: UsageItem[]
+  totals: {
+    generations: number
+    total_tokens: number
+    audio_bytes: number
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Settings                                                            */
 /* ------------------------------------------------------------------ */

@@ -9,6 +9,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
 import AudioPlayer from '@/components/AudioPlayer.vue'
 import ErrorAlert from '@/components/ErrorAlert.vue'
+import UsagePanel from '@/components/UsagePanel.vue'
 import { ApiError } from '@/api/http'
 import { audioUrl, deleteHistoryItem, fetchHistoryDetail } from '@/api'
 import type { HistoryDetail, HistoryItem, TaskStatus } from '@/api/types'
@@ -397,6 +398,8 @@ watch(drawerVisible, (open) => {
       @retry="historyStore.load()"
       @dismiss="historyStore.error = null"
     />
+
+    <UsagePanel ref="usagePanelRef" />
 
     <el-card shadow="never" class="history-view__table-card">
       <el-table

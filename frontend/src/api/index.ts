@@ -20,6 +20,7 @@ import type {
   HistoryDetail,
   HistoryListResponse,
   HistoryQuery,
+  HistoryStats,
   MediaInfo,
   ProbePathsRequest,
   ProbePathsResponse,
@@ -30,6 +31,8 @@ import type {
   TrimMediaRequest,
   TrimMediaResponse,
   UpdateSettingsRequest,
+  UsageQuery,
+  UsageResponse,
   ValidateProviderRequest,
   ValidateProviderResponse,
   VoiceListResponse,
@@ -216,6 +219,24 @@ export function deleteHistoryBulk(
   payload: DeleteHistoryBulkRequest,
 ): Promise<DeleteHistoryBulkResponse> {
   return del<DeleteHistoryBulkResponse>('/history', payload)
+}
+
+/** `GET /history/stats` — totals, success/failure counts, disk usage. */
+export function fetchHistoryStats(): Promise<HistoryStats> {
+  return get<HistoryStats>('/history/stats')
+}
+
+/** Absolute URL of the CSV export (used as a plain download link). */
+export function historyExportUrl(): string {
+  return `${import.meta.env.VITE_API_BASE_URL || '/api/v1'}/history/export`
+}
+
+/**
+ * `GET /meta/usage` — token/audio aggregation over a window, grouped by one
+ * of llm_provider / llm_model / tts_provider / tts_voice / day.
+ */
+export function fetchUsage(params: UsageQuery): Promise<UsageResponse> {
+  return get<UsageResponse>('/meta/usage', { days: params.days, group_by: params.groupBy })
 }
 
 /** `GET /audio/{id}` — absolute URL usable directly as an `<audio src>`. */
