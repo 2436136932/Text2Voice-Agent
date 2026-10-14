@@ -50,6 +50,7 @@ from app.schemas.generation import (
     UsageSchema,
 )
 from app.services.audio import audio_store, estimate_duration_ms
+from app.services.cache import cache_key, tts_cache
 from app.services.media import media_store
 from app.services.metrics import metrics
 from app.services.providers import annotate_tts_error
@@ -251,6 +252,7 @@ class GenerationService:
         request: GenerateRequest,
         reply_text: str,
         *,
+        session: AsyncSession,
         on_progress: ProgressCallback,
     ) -> tuple[bytes, TTSResultSchema, str, bool, str | None]:
         """Return ``(audio, result, audio_format, degraded, degraded_reason)``."""
@@ -332,6 +334,45 @@ class GenerationService:
             extra=extra,
         )
 
+        # ---- synthesis cache ------------------------------------------------
+        # Identical (provider, model, voice, speed, format, reference, text)
+        # must produce identical bytes, so a hit is a full skip of the vendor
+        # call — the paid, slow leg of the pipeline. Degraded/fallback runs
+        # never touch the cache (a silent placeholder must not poison it).
+        effective_speed = adapter.clamp_speed(request.tts.speed)
+        key = cache_key(
+            provider=adapter.id,
+            model=tts_request.model,
+            voice=voice,
+            speed=effective_speed,
+            audio_format=audio_format,
+            text=reply_text,
+            reference_bytes=extra.get("reference_audio_bytes"),
+        )
+        cached = await tts_cache.get(session, key)
+        if cached is not None:
+            audio, entry = cached
+            on_progress("tts", 85, "命中缓存，直接返回上次的合成结果")
+            logger.info(
+                "tts cache hit provider=%s key=%s bytes=%s",
+                adapter.id, key[:12], len(audio),
+            )
+            metrics.incr("tts_cache_hits")
+            return (
+                audio,
+                TTSResultSchema(
+                    provider=adapter.id,
+                    voice=voice,
+                    latency_ms=0,
+                    format=audio_format,
+                    bytes=len(audio),
+                    used_reference_audio=bool(extra.get("reference_audio_bytes")),
+                ),
+                audio_format,
+                False,
+                None,
+            )
+
         if tts_budget.is_open(adapter.id):
             error = AppError(
                 ErrorCode.TTS_UPSTREAM_ERROR,
@@ -366,6 +407,21 @@ class GenerationService:
         metrics.record_provider_call("tts", adapter.id, ok=True)
         tts_budget.record_success(adapter.id)
         on_progress("tts", 85, "语音合成完成")
+
+        # Cache the fresh synthesis so identical future requests skip the
+        # vendor call. Best-effort: failures inside put() are logged, not raised.
+        await tts_cache.put(
+            session,
+            key=key,
+            provider=adapter.id,
+            model=tts_request.model,
+            voice=voice,
+            audio_format=audio_format,
+            content_type=result.content_type,
+            audio=result.audio,
+            duration_ms=None,  # duration is estimated later for the record
+        )
+        metrics.incr("tts_cache_misses")
 
         return (
             result.audio,
@@ -443,7 +499,7 @@ class GenerationService:
             degraded_reasons.append(llm_reason)
 
         audio, tts_result, audio_format, tts_degraded, tts_reason = await self._run_tts(
-            request, reply_text, on_progress=progress
+            request, reply_text, session=session, on_progress=progress
         )
         if tts_degraded and tts_reason:
             degraded_reasons.append(tts_reason)

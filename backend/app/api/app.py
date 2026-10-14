@@ -23,6 +23,7 @@ from app.core.errors import DEFAULT_STATUS, ErrorCode
 from app.core.logging import configure_logging, get_logger
 from app.db.base import dispose_db, get_sessionmaker, init_db
 from app.schemas.generation import ErrorResponse, HealthResponse
+from app.services.cache import tts_cache
 from app.services.history import history_service
 from app.services.media import media_store
 from app.services.tasks import task_manager
@@ -54,6 +55,13 @@ async def _retention_loop() -> None:
                 purged = media_store.purge_older_than(days=settings.media_retention_days)
                 if purged:
                     logger.info("retention job purged media=%s", purged)
+            # Cache maintenance: TTL eviction happens inside put(), but a quiet
+            # app never calls put(), so TTL+orphans get their own daily pass.
+            if settings.tts_cache_max_entries > 0:
+                async with get_sessionmaker()() as session:
+                    await tts_cache._enforce_caps(session)
+                    await session.commit()
+                    await tts_cache.sweep_orphan_files(session)
         except asyncio.CancelledError:  # pragma: no cover
             return
         except Exception:  # noqa: BLE001

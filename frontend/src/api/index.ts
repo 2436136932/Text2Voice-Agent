@@ -167,6 +167,11 @@ export function fetchTaskResult(taskId: string): Promise<GenerateResponse> {
   return get<GenerateResponse>(`/tasks/${encodeURIComponent(taskId)}/result`)
 }
 
+/** `DELETE /tasks/{task_id}` — cancel a pending/running task. */
+export function cancelTask(taskId: string): Promise<TaskStatusResponse> {
+  return del<TaskStatusResponse>(`/tasks/${encodeURIComponent(taskId)}`)
+}
+
 /** `POST /generate` — synchronous generation variant. */
 export function generateSync(payload: GenerateRequest): Promise<GenerateResponse> {
   return post<GenerateResponse>('/generate', payload)

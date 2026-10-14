@@ -289,11 +289,53 @@ class ClonedVoice(Base):
         }
 
 
+class TTSCacheEntry(Base):
+    """Deduplicated synthesis results, keyed by exact request parameters.
+
+    Re-synthesizing the *same* text with the *same* voice/settings is the
+    common case (retry after a player hiccup, replaying a favourite, the
+    仅重新合成语音 action), yet every repeat paid full vendor cost and the
+    5–10 s synthesis latency. The cache key is a sha256 over everything that
+    changes the output — provider, model, voice, speed, format, and the exact
+    text — so a hit is bit-for-bit equivalent to a fresh call.
+
+    Eviction is LRU-by-recency with a size cap (see ``cache`` service and the
+    retention loop): peers like Open WebUI learned the hard way that an
+    unbounded audio cache fills the disk silently (open-webui#12040).
+    """
+
+    __tablename__ = "tts_cache"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    #: sha256 hex of provider|model|voice|speed|format|reference|text.
+    cache_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    model: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    voice: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    audio_format: Mapped[str] = mapped_column(String(16), nullable=False, default="mp3")
+    #: Path *relative to* the audio store root, like ``GenerationRecord``.
+    audio_path: Mapped[str] = mapped_column(String(255), nullable=False)
+    audio_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    content_type: Mapped[str] = mapped_column(String(64), nullable=False, default="audio/mpeg")
+    #: LRU bookkeeping — entries past the size cap are evicted oldest-first.
+    hit_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow, server_default=func.now()
+    )
+    last_hit_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow
+    )
+
+    __table_args__ = (Index("ix_tts_cache_last_hit", "last_hit_at"),)
+
+
 __all__ = [
     "GenerationRecord",
     "TaskModel",
     "SettingModel",
     "ClonedVoice",
+    "TTSCacheEntry",
     "AppSetting",
     "utcnow",
 ]

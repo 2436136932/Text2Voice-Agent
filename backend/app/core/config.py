@@ -61,6 +61,13 @@ class Settings(BaseSettings):
     #: Largest accepted upload (MB) for reference clips.
     max_upload_mb: int = 50
 
+    # -- Synthesis cache ----------------------------------------------------
+    # Deduplicates identical TTS requests (same provider/model/voice/speed/
+    # format/text). 0 disables the cache entirely.
+    tts_cache_max_entries: int = 500
+    # Entries not touched for this many days are evicted regardless of count.
+    tts_cache_ttl_days: int = 14
+
     # -- Security -----------------------------------------------------------
     # ``/docs`` and ``/openapi.json`` are disabled when true.
     disable_docs: bool = False
@@ -144,6 +151,17 @@ class Settings(BaseSettings):
     @property
     def media_path(self) -> Path:
         return self.resolve_path(self.media_dir)
+
+    @property
+    def cache_dir(self) -> Path:
+        """Cache audio lives *beside* regular audio, in its own subtree.
+
+        Keeping it separate (a) makes the "cache is disposable" contract
+        explicit — wiping it never touches history files — and (b) mirrors
+        the cache/user-data separation Open WebUI adopted after its bundled
+        cache grew into user data (open-webui#12040).
+        """
+        return self.audio_path / "cache"
 
 
 @functools.lru_cache(maxsize=1)

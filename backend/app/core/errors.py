@@ -81,6 +81,11 @@ class ErrorCode(str, Enum):
     MEDIA_TOO_LARGE = "MEDIA_TOO_LARGE"
     MEDIA_TRIM_UNSUPPORTED = "MEDIA_TRIM_UNSUPPORTED"
     MEDIA_INVALID_RANGE = "MEDIA_INVALID_RANGE"
+    #: TODO: declared and documented, but deliberately not raised yet. The trim
+    #: path reports :data:`MEDIA_TRIM_UNSUPPORTED` for every "needs ffmpeg"
+    #: case, which is more specific about *what the user was doing*. Raise this
+    #: one instead if a future video-extraction endpoint needs to signal
+    #: "ffmpeg is the missing piece" independently of trimming.
     FFMPEG_REQUIRED = "FFMPEG_REQUIRED"
 
     # -- 7xxx voice cloning --------------------------------------------------

@@ -22,7 +22,7 @@ import MediaPicker from '@/components/MediaPicker.vue'
 import ResultCard from '@/components/ResultCard.vue'
 import TextInputCard from '@/components/TextInputCard.vue'
 import { ApiError } from '@/api/http'
-import { fetchCapabilities, fetchTask, fetchTaskResult, submitTask } from '@/api'
+import { cancelTask, fetchCapabilities, fetchTask, fetchTaskResult, submitTask } from '@/api'
 import type {
   CapabilitiesResponse,
   GenerateOptions,
@@ -48,6 +48,7 @@ const error = ref<ApiError | null>(null)
 const elapsedSeconds = ref(0)
 const capabilities = ref<CapabilitiesResponse | null>(null)
 const referenceMedia = ref<MediaInfo | null>(null)
+const canceling = ref(false)
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let tickTimer: ReturnType<typeof setInterval> | null = null
@@ -249,6 +250,27 @@ async function runGeneration(overrides?: Partial<GenerateOptions>): Promise<void
 
 function handleRetry(): void {
   void runGeneration()
+}
+
+/** Cancel the in-flight task: stop polling and tell the backend to abort. */
+async function handleCancel(): Promise<void> {
+  const taskId = task.value?.task_id
+  if (!taskId) return
+  canceling.value = true
+  try {
+    await cancelTask(taskId)
+    ElMessage.info('已请求取消，正在停止…')
+  } catch {
+    // The task may have finished between the click and the call — poll will
+    // pick up the terminal state on its next tick, so a missed cancel is
+    // harmless. Only network-level failures surface here.
+    ElMessage.warning('取消请求失败，任务可能已完成')
+  } finally {
+    canceling.value = false
+  }
+  // Stop the local UI immediately; the poll handler turns the eventual
+  // 'canceled' status into the standard error display if it lands.
+  finish()
 }
 
 function handleRegenerate(): void {
@@ -474,6 +496,15 @@ const referenceHint = computed<string>(() => {
               <span>{{ stageText }}</span>
               <span class="t2v-muted">{{ stageMessage }}</span>
               <span class="t2v-muted">{{ elapsedText }}</span>
+              <el-button
+                link
+                type="danger"
+                size="small"
+                :loading="canceling"
+                @click="handleCancel"
+              >
+                停止生成
+              </el-button>
             </div>
           </div>
         </el-card>
