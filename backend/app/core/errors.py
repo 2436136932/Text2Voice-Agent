@@ -15,7 +15,8 @@ Range   Meaning
 1xxx    Generic / request validation / routing
 2xxx    LLM (chat completion) adapter failures
 3xxx    TTS (speech synthesis) adapter failures
-4xxx    Async task lifecycle failures
+4xxx    Async task lifecycle failures (``TASK_INTERRUPTED`` = the task was
+        orphaned by a restart and must be resubmitted)
 5xxx    Rate limiting, payload limits, storage and internal errors
 ======  ===========================================================
 """
@@ -74,6 +75,11 @@ class ErrorCode(str, Enum):
     TASK_QUEUE_FULL = "TASK_QUEUE_FULL"
     TASK_CANCELED = "TASK_CANCELED"
     TASK_ALREADY_FINISHED = "TASK_ALREADY_FINISHED"
+    #: The process restarted while the task was still pending/running, so it
+    #: can never finish (the worker that owned it is gone, and its payload is
+    #: not persisted because it contains credentials). Terminal, but *not* a
+    #: server fault: the user is expected to resubmit.
+    TASK_INTERRUPTED = "TASK_INTERRUPTED"
 
     # -- 6xxx media (upload / trim) -----------------------------------------
     MEDIA_NOT_FOUND = "MEDIA_NOT_FOUND"
@@ -139,6 +145,7 @@ DEFAULT_STATUS: dict[ErrorCode, int] = {
     ErrorCode.TASK_QUEUE_FULL: status.HTTP_503_SERVICE_UNAVAILABLE,
     ErrorCode.TASK_CANCELED: status.HTTP_409_CONFLICT,
     ErrorCode.TASK_ALREADY_FINISHED: status.HTTP_409_CONFLICT,
+    ErrorCode.TASK_INTERRUPTED: status.HTTP_409_CONFLICT,
     ErrorCode.MEDIA_NOT_FOUND: status.HTTP_404_NOT_FOUND,
     ErrorCode.MEDIA_UNSUPPORTED_FORMAT: status.HTTP_400_BAD_REQUEST,
     ErrorCode.MEDIA_TOO_LARGE: status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,

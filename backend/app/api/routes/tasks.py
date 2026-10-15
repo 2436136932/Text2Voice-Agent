@@ -66,7 +66,9 @@ async def list_tasks(_: RateLimitDefault, limit: int = 50) -> dict:
     summary="查询任务状态与进度",
     description=(
         "`stage` 取值：`queued` → `llm` → `tts` → `persist` → `done`，"
-        "配合 `progress`(0-100) 与 `message` 驱动前端进度条。"
+        "配合 `progress`(0-100) 与 `message` 驱动前端进度条。\n\n"
+        "`status` 中只有 `pending` / `running` 是**未结束**状态，出现其它取值即可停止轮询；"
+        "其中 `interrupted` 表示服务重启导致任务中断，需重新提交。"
     ),
     responses={404: {"description": "任务不存在或已过期"}},
 )
@@ -80,10 +82,13 @@ async def get_task(task_id: str, _: RateLimitDefault) -> TaskStatusResponse:
     "/{task_id}/result",
     response_model=GenerateResponse,
     summary="获取任务结果",
-    description="任务未完成时返回 409 `TASK_NOT_FINISHED`。",
+    description=(
+        "任务未完成时返回 409 `TASK_NOT_FINISHED`；"
+        "任务因服务重启而中断时返回 409 `TASK_INTERRUPTED`（需重新提交）。"
+    ),
     responses={
         404: {"description": "任务不存在"},
-        409: {"description": "任务尚未完成或已取消"},
+        409: {"description": "任务尚未完成、已取消或已中断"},
         500: {"description": "任务执行失败"},
     },
 )
@@ -95,7 +100,10 @@ async def get_task_result(task_id: str, _: RateLimitDefault) -> GenerateResponse
     "/{task_id}",
     response_model=TaskStatusResponse,
     summary="取消任务",
-    description="仅对 `pending` / `running` 状态的任务有效。",
+    description=(
+        "仅对 `pending` / `running` 状态的任务有效。"
+        "已中断（`interrupted`）等已结束的任务返回 409 `TASK_ALREADY_FINISHED`。"
+    ),
     responses={409: {"description": "任务已结束，无法取消"}},
 )
 async def cancel_task(task_id: str, _: RateLimitDefault) -> TaskStatusResponse:

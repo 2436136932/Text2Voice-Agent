@@ -37,7 +37,11 @@ from app.schemas.datetime_utils import AwareUTC
 from app.core.config import settings
 
 ProviderKind = Literal["llm", "tts"]
-TaskStatus = Literal["pending", "running", "succeeded", "failed", "canceled"]
+#: Task lifecycle states. ``pending``/``running`` are the only *non-terminal*
+#: ones (the UI polls until it sees anything else); ``interrupted`` is the
+#: terminal state a task falls into when the server restarted while it was
+#: still queued or running — it can never complete, so it ends polling too.
+TaskStatus = Literal["pending", "running", "succeeded", "failed", "canceled", "interrupted"]
 TaskStage = Literal["queued", "llm", "tts", "persist", "done"]
 
 #: Matches a leading URI scheme (``javascript:``, ``file:``, ``https:``…).

@@ -21,9 +21,29 @@ Design
   ``task_queue_size``, which is the backpressure signal the UI shows;
 * finished tasks are garbage collected after ``task_retention_minutes``.
 
+Restart semantics
+-----------------
+The pool is process-local, so a restart orphans whatever was still in flight.
+Those tasks are **not** resumable and must not pretend otherwise:
+
+* their real ``GenerateRequest`` lives in ``_pending_payloads`` during the
+  lifetime of the process (it holds the API keys, and only the
+  credential-stripped snapshot is written to the ``tasks`` row), so nothing
+  can re-run them after a restart;
+* :meth:`TaskManager.restore_from_db` therefore rewrites every ``pending`` /
+  ``running`` row it finds into the terminal ``interrupted`` status, with a
+  ``TASK_INTERRUPTED`` error payload telling the user to resubmit.
+
+Leaving them as ``pending``/``running`` instead is a permanent zombie: the row
+has no worker and no payload, yet ``active_count()`` keeps counting it and the
+UI keeps polling a task that will never move. Rehydrating rows verbatim was
+exactly that bug. The rewrite is persisted, so a second boot does not re-mark
+anything (and an already-interrupted row is left untouched).
+
 The manager is process-local on purpose. For multi-worker deployments put a
 real broker (Celery/RQ/Arq) behind the same ``submit/status/result`` contract -
-the routes only depend on that interface.
+the routes only depend on that interface. Such a broker is also what would be
+needed to make in-flight tasks resumable across a restart.
 """
 
 from __future__ import annotations
@@ -48,7 +68,24 @@ logger = get_logger(__name__)
 #: Stage -> progress floor, used when a stage is entered without an explicit
 #: percentage (keeps the UI bar monotonic).
 STAGE_PROGRESS = {"queued": 0, "llm": 15, "tts": 60, "persist": 92, "done": 100}
-TERMINAL_STATUSES = {"succeeded", "failed", "canceled"}
+#: Terminal, i.e. the UI stops polling. ``interrupted`` is terminal on purpose:
+#: the worker that owned the task died with the process, so it will never
+#: change state again (see the module docstring).
+TERMINAL_STATUSES = {"succeeded", "failed", "canceled", "interrupted"}
+#: Terminal state applied to a task whose worker did not survive a restart.
+INTERRUPTED_STATUS = "interrupted"
+#: Statuses that can only ever be transient within one process lifetime.
+ACTIVE_STATUSES = {"pending", "running"}
+
+#: User-facing explanation for a task orphaned by a restart. Deliberately
+#: actionable: the payload (and its keys) is gone, so resubmitting is the only
+#: way forward, and the message must say so instead of leaving a dead progress
+#: bar on screen.
+INTERRUPTED_MESSAGE = "服务已重启，该任务已中断，无法继续执行，请重新提交。"
+INTERRUPTED_SUGGESTION = (
+    "任务在服务重启时被中断，未完成的进度无法恢复（密钥不会落盘，因此无法自动续跑）。"
+    "请返回生成页重新提交任务。"
+)
 
 
 def _as_aware_utc(value: datetime | None) -> datetime | None:
@@ -239,12 +276,29 @@ class TaskManager:
 
     def result(self, task_id: str) -> dict[str, Any]:
         state = self.get(task_id)
-        if state.status in {"pending", "running"}:
+        if state.status in ACTIVE_STATUSES:
             raise AppError(
                 ErrorCode.TASK_NOT_FINISHED,
                 "任务尚未完成，请稍后再试。",
                 detail={"task_id": task_id, "status": state.status, "stage": state.stage},
                 http_status=409,
+            )
+        if state.status == INTERRUPTED_STATUS:
+            # Must be checked *before* the generic "result is missing" branch
+            # below: an interrupted task legitimately has no result, and
+            # reporting that as INTERNAL_ERROR/500 would tell the user the
+            # server broke instead of "your task was interrupted, resubmit".
+            raise AppError(
+                ErrorCode.TASK_INTERRUPTED,
+                (state.error or {}).get("message", INTERRUPTED_MESSAGE),
+                detail={
+                    "task_id": task_id,
+                    "status": state.status,
+                    "suggestion": INTERRUPTED_SUGGESTION,
+                    "retryable": True,
+                },
+                http_status=409,
+                retryable=True,
             )
         if state.status == "failed":
             raise AppError(
@@ -289,7 +343,10 @@ class TaskManager:
         return state
 
     def active_count(self) -> int:
-        return sum(1 for state in self._tasks.values() if state.status in {"pending", "running"})
+        # Only genuinely in-flight work counts as active; ``interrupted`` is
+        # terminal (see ACTIVE_STATUSES), otherwise the health endpoint would
+        # report a phantom load forever.
+        return sum(1 for state in self._tasks.values() if state.status in ACTIVE_STATUSES)
 
     def list_tasks(self, *, limit: int = 50) -> list[dict[str, Any]]:
         # Normalise before sorting: restored rows carry naive timestamps, and
@@ -452,8 +509,33 @@ class TaskManager:
             except Exception:  # noqa: BLE001
                 logger.exception("task cleanup loop error")
 
+    @staticmethod
+    def _interrupted_error(request_id: str | None) -> dict[str, Any]:
+        """Error payload stored on a task orphaned by a restart.
+
+        Shaped like every other :class:`AppError` envelope so the frontend can
+        render it with the generic error renderer, with an actionable
+        ``detail.suggestion`` (there is no way to resume — only to resubmit).
+        """
+        return AppError(
+            ErrorCode.TASK_INTERRUPTED,
+            INTERRUPTED_MESSAGE,
+            detail={"suggestion": INTERRUPTED_SUGGESTION, "retryable": True},
+            retryable=True,
+        ).to_payload(request_id)
+
     async def restore_from_db(self) -> None:
-        """Rehydrate finished tasks after a restart (best effort)."""
+        """Rehydrate tasks after a restart, closing out the orphaned ones.
+
+        Finished rows come back as they were. ``pending``/``running`` rows
+        cannot: their worker is gone with the previous process and their real
+        payload (which holds the API keys) was never persisted, so they are
+        rewritten to the terminal ``interrupted`` state — in memory *and* in
+        the table, so the next boot finds an already-terminal row and leaves it
+        alone.
+
+        Best effort: a database problem must not stop the app from booting.
+        """
         try:
             from sqlalchemy import select
 
@@ -463,6 +545,34 @@ class TaskManager:
                         select(TaskModel).order_by(TaskModel.created_at.desc()).limit(100)
                     )
                 ).scalars().all()
+                # Only rows that were still in flight are rewritten; anything
+                # already terminal (including a row interrupted on an earlier
+                # boot) is restored verbatim, which is what makes this
+                # idempotent.
+                orphans = [row for row in rows if row.status in ACTIVE_STATUSES]
+                finished_at = datetime.now(timezone.utc)
+                for row in orphans:
+                    # Started tasks keep a progress value worth showing; queued
+                    # ones never started, so they stay at their 0.
+                    row.status = INTERRUPTED_STATUS
+                    row.stage = "done"
+                    row.message = INTERRUPTED_MESSAGE[:255]
+                    row.error = self._interrupted_error(row.request_id)
+                    if row.finished_at is None:
+                        row.finished_at = finished_at
+                    # A task without a start time never began executing, so its
+                    # elapsed time must stay unknown instead of being invented.
+                    if row.started_at is not None:
+                        row.elapsed_ms = max(
+                            0,
+                            int(
+                                (
+                                    _as_aware_utc(row.finished_at)
+                                    - _as_aware_utc(row.started_at)
+                                ).total_seconds()
+                                * 1000
+                            ),
+                        )
             for row in rows:
                 self._tasks[row.task_id] = TaskState(
                     task_id=row.task_id,
@@ -480,6 +590,10 @@ class TaskManager:
                     started_at=_as_aware_utc(row.started_at),
                     finished_at=_as_aware_utc(row.finished_at),
                     request_id=row.request_id,
+                )
+            if orphans:
+                logger.warning(
+                    "marked interrupted tasks count=%s (worker lost in a restart)", len(orphans)
                 )
             logger.info("restored tasks from database count=%s", len(rows))
         except Exception as exc:  # noqa: BLE001
