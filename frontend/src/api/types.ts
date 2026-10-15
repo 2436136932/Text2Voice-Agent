@@ -567,3 +567,28 @@ export interface HealthResponse {
   version: string
   uptime_seconds: number
 }
+
+/* ------------------------------------------------------------------ */
+/* Metrics                                                             */
+/* ------------------------------------------------------------------ */
+
+/** `GET /meta/metrics` — process-lifetime counters plus the live queue depth. */
+export interface MetricsResponse {
+  /** Seconds since the process started (a float, rounded to 3 decimals). */
+  uptime_seconds: number
+  requests_total: number
+  generations_total: number
+  generations_succeeded: number
+  generations_failed: number
+  /** Generations that silently fell back to another provider/voice. */
+  generations_degraded: number
+  /** Live queue depth: overridden with `task_manager.active_count()`. */
+  active_tasks: number
+  /**
+   * Call counters keyed `"<kind>:<provider>:<ok|error>"`,
+   * e.g. `{ "llm:deepseek:ok": 12, "tts:openai:error": 1 }`.
+   *
+   * Parse with `parseProviderCalls()` from `@/utils/metrics`.
+   */
+  provider_calls: Record<string, number>
+}

@@ -22,6 +22,7 @@ import type {
   HistoryQuery,
   HistoryStats,
   MediaInfo,
+  MetricsResponse,
   ProbePathsRequest,
   ProbePathsResponse,
   ProvidersResponse,
@@ -274,4 +275,18 @@ export function updateSettings(payload: UpdateSettingsRequest): Promise<ServerSe
 /** `GET /health` — backend liveness probe used by the header indicator. */
 export function fetchHealth(): Promise<HealthResponse> {
   return get<HealthResponse>('/health')
+}
+
+/* ------------------------------------------------------------------ */
+/* Metrics                                                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * `GET /meta/metrics` — process-level counters for the ops dashboard.
+ *
+ * `active_tasks` is the live queue depth (the backend overrides the stored
+ * counter with `task_manager.active_count()`), so it changes on every call.
+ */
+export function fetchMetrics(): Promise<MetricsResponse> {
+  return get<MetricsResponse>('/meta/metrics')
 }

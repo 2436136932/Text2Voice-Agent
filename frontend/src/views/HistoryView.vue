@@ -9,6 +9,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
 import AudioPlayer from '@/components/AudioPlayer.vue'
 import ErrorAlert from '@/components/ErrorAlert.vue'
+import MetricsPanel from '@/components/MetricsPanel.vue'
 import UsagePanel from '@/components/UsagePanel.vue'
 import { ApiError } from '@/api/http'
 import { audioUrl, deleteHistoryItem, fetchHistoryDetail } from '@/api'
@@ -401,6 +402,8 @@ watch(drawerVisible, (open) => {
     />
 
     <UsagePanel ref="usagePanelRef" />
+
+    <MetricsPanel ref="metricsPanelRef" />
 
     <el-card shadow="never" class="history-view__table-card">
       <el-table
