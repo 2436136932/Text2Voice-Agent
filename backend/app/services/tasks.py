@@ -88,6 +88,12 @@ INTERRUPTED_SUGGESTION = (
 )
 
 
+#: Sentinel pushed onto the queue by :meth:`TaskManager.stop` to wake idle
+#: workers so they can notice the shutdown flag and exit on their own, instead
+#: of being cancelled mid-await (which cannot unwind a DB write cleanly).
+_SHUTDOWN = "\x00__shutdown__"
+
+
 def _as_aware_utc(value: datetime | None) -> datetime | None:
     """Return ``value`` as a timezone-aware UTC datetime.
 
@@ -163,6 +169,10 @@ class TaskManager:
         self._cleanup_task: asyncio.Task | None = None
         self._started = False
         self._lock = asyncio.Lock()
+        #: Set while shutting down, so workers skip their blocking DB write.
+        #: See the finally block in _worker(): awaiting persistence while being
+        #: cancelled is what made stop() wait forever.
+        self._shutting_down = False
         #: Payloads awaiting execution. They contain credentials, so they live
         #: in memory only and are dropped the moment the task finishes.
         self._pending_payloads: dict[str, GenerateRequest] = {}
@@ -173,6 +183,9 @@ class TaskManager:
     async def start(self) -> None:
         if self._started:
             return
+        # Clear any flag left over from a previous stop(), so a restart behaves
+        # exactly like a first start.
+        self._shutting_down = False
         self._queue = asyncio.Queue(maxsize=settings.task_queue_size)
         for index in range(max(1, settings.task_workers)):
             self._workers.append(
@@ -187,13 +200,45 @@ class TaskManager:
 
     async def stop(self) -> None:
         self._started = False
+        # Workers consult this to wind down voluntarily. The old implementation
+        # cancelled them instead, which is what hung shutdown: a worker killed
+        # while parked inside `session_scope()` still has to run its teardown
+        # (`await session.commit()`), and an aiosqlite commit does not observe
+        # task cancellation -- it blocks on its worker thread. `gather()` then
+        # waited forever, freezing the whole process (and, in CI, the suite).
+        self._shutting_down = True
         if self._cleanup_task is not None:
             self._cleanup_task.cancel()
             self._cleanup_task = None
-        for worker in self._workers:
-            worker.cancel()
+
+        # Wake every idle worker so it can see the flag. A worker blocked on
+        # `queue.get()` is not awaiting anything cancellable-sensitive; putting
+        # a sentinel in lets it return on its own.
+        assert self._queue is not None
+        for _ in self._workers:
+            try:
+                self._queue.put_nowait(_SHUTDOWN)
+            except asyncio.QueueFull:  # pragma: no cover - pathological
+                break
+
         if self._workers:
-            await asyncio.gather(*self._workers, return_exceptions=True)
+            # Bounded as a last resort: if any worker still cannot finish (a
+            # provider call that ignores cancellation), shutdown proceeds
+            # rather than hanging the process forever.
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*self._workers, return_exceptions=True),
+                    timeout=10.0,
+                )
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                logger.warning(
+                    "task manager stop timed out; %s worker(s) did not finish",
+                    len(self._workers),
+                )
+                # Cancel whatever is left, but do NOT await it -- that is the
+                # operation that can never complete.
+                for worker in self._workers:
+                    worker.cancel()
         self._workers.clear()
         self._queue = None
         logger.info("task manager stopped")
@@ -367,7 +412,19 @@ class TaskManager:
         while True:
             try:
                 task_id = await self._queue.get()
-            except asyncio.CancelledError:  # pragma: no cover - shutdown
+            except asyncio.CancelledError:  # pragma: no cover - hard cancel
+                return
+
+            # Shutdown sentinel from stop(): exit cleanly *between* items,
+            # where there is no half-finished DB write to unwind.
+            if task_id == _SHUTDOWN:
+                self._queue.task_done()
+                logger.debug("worker %s exiting on shutdown", index)
+                return
+
+            # Also stop picking up new work once shutdown has been requested.
+            if self._shutting_down:
+                self._queue.task_done()
                 return
 
             state = self._tasks.get(task_id)
@@ -430,7 +487,21 @@ class TaskManager:
                     state.finished_at = datetime.now(timezone.utc)
                 self._pending_payloads.pop(task_id, None)
                 state.handle = None
-                await self._persist(state)
+                # Shutdown is the one case where this must NOT await.
+                #
+                # `stop()` cancels the workers and then gathers them. If a
+                # worker is cancelled while parked inside this finally block,
+                # the `await self._persist(state)` never completes and the
+                # gather waits forever -- the whole process hangs at constant
+                # CPU. That is exactly the intermittent full-suite freeze seen
+                # on this host (reproducible at test_tasks.py::TestRestore,
+                # the last test that submits a task). Skipping the durable
+                # write during shutdown is harmless: the row already exists
+                # (it is written on submit) and the state is re-derived on the
+                # next boot by restore_from_db(), which rewrites any
+                # pending/running row to the terminal 'interrupted' status.
+                if not self._shutting_down:
+                    await self._persist(state)
                 self._queue.task_done()
 
     def _make_progress_callback(self, state: TaskState):
