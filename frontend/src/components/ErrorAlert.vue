@@ -66,6 +66,18 @@ const diagnostic = computed<string>(() =>
   ),
 )
 
+/**
+ * `detail.suggestion` as visible text.
+ *
+ * The backend puts the *actionable* instruction here (for an interrupted task:
+ * "keys are never stored, so resubmit"). Leaving it buried in the collapsed
+ * JSON block would hide the one line that tells the user what to do next.
+ */
+const suggestion = computed<string>(() => {
+  const value = props.error?.detail?.suggestion
+  return typeof value === 'string' ? value.trim() : ''
+})
+
 /** Element Plus alert type derived from the failure kind. */
 const alertType = computed<'error' | 'warning'>(() => {
   if (!props.error) return 'error'
@@ -98,6 +110,10 @@ async function handleCopy(): Promise<void> {
 
     <div class="error-alert__body">
       <p class="error-alert__message">{{ error.message }}</p>
+
+      <p v-if="suggestion" class="error-alert__suggestion">
+        <strong>建议：</strong>{{ suggestion }}
+      </p>
 
       <div class="error-alert__meta">
         <el-tag type="danger" size="small" effect="plain">code: {{ code }}</el-tag>
@@ -174,6 +190,14 @@ async function handleCopy(): Promise<void> {
 
 .error-alert__message {
   color: var(--t2v-text-primary);
+  word-break: break-word;
+  line-height: 1.6;
+}
+
+/* The actionable instruction from `detail.suggestion`. */
+.error-alert__suggestion {
+  margin-top: 6px;
+  color: var(--t2v-text-secondary);
   word-break: break-word;
   line-height: 1.6;
 }

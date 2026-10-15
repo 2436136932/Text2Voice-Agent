@@ -35,6 +35,7 @@ import type {
 import { useConfigStore } from '@/stores/config'
 import { useSettingsStore } from '@/stores/settings'
 import { genderLabel } from '@/utils/format'
+import { isTerminalStatus } from '@/utils/taskStatus'
 
 const props = defineProps<{ kind: ProviderKind }>()
 
@@ -217,7 +218,9 @@ async function auditionVoice(): Promise<void> {
         auditionUrl.value = result.audio_url
         break
       }
-      if (status.status === 'failed' || status.status === 'canceled') {
+      // 'succeeded' already broke out above, so anything terminal here is a
+      // failure — including 'interrupted' (the server restarted mid-audition).
+      if (isTerminalStatus(status.status)) {
         ElMessage.error('试听失败：' + (status.error?.message || '未知错误'))
         break
       }

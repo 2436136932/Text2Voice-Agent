@@ -61,6 +61,8 @@ export function statusLabel(status: string): string {
       return '失败'
     case 'canceled':
       return '已取消'
+    case 'interrupted':
+      return '已中断'
     default:
       return status
   }
@@ -74,6 +76,10 @@ export function statusTagType(status: string): 'success' | 'warning' | 'danger' 
     case 'running':
       return 'warning'
     case 'failed':
+      return 'danger'
+    // An interrupted task is a failure state, not a neutral one: the work was
+    // lost and the user has to resubmit, so it must not render as grey "info".
+    case 'interrupted':
       return 'danger'
     default:
       return 'info'

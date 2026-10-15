@@ -355,7 +355,14 @@ export interface GenerateRequest {
   options: GenerateOptions
 }
 
-export type TaskStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'canceled'
+export type TaskStatus =
+  | 'pending'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'canceled'
+  /** Terminal: the server restarted while the task was queued/running. */
+  | 'interrupted'
 
 export type TaskStage = 'queued' | 'llm' | 'tts' | 'persist' | 'done'
 

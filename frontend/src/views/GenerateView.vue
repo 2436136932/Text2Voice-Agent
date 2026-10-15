@@ -33,6 +33,7 @@ import type {
 } from '@/api/types'
 import { MAX_TEXT_LENGTH, useConfigStore, type GenerationMode } from '@/stores/config'
 import { stageLabel } from '@/utils/format'
+import { isTerminalStatus, taskErrorFields } from '@/utils/taskStatus'
 import { segmentText } from '@/utils/segment'
 
 const configStore = useConfigStore()
@@ -200,19 +201,19 @@ async function poll(taskId: string): Promise<void> {
       return
     }
 
-    if (status.status === 'failed' || status.status === 'canceled') {
+    // Every non-pending/running status is terminal. `interrupted` (the server
+    // restarted mid-task) must be routed here *before* the timeout check
+    // below, otherwise the dead task polls for five minutes and then reports
+    // a misleading "轮询超过 5 分钟" instead of the real, actionable reason.
+    if (isTerminalStatus(status.status)) {
       finish()
-      error.value = status.error
-        ? new ApiError({
-            code: status.error.code,
-            message: status.error.message,
-            detail: status.error.detail,
-            requestId: status.error.request_id,
-          })
-        : new ApiError({
-            code: status.status === 'canceled' ? 'TASK_CANCELED' : 'TASK_FAILED',
-            message: status.status === 'canceled' ? '任务已取消' : '任务执行失败',
-          })
+      const fields = taskErrorFields(status)
+      error.value = new ApiError({
+        code: fields.code,
+        message: fields.message,
+        detail: fields.detail,
+        requestId: fields.requestId,
+      })
       return
     }
 
@@ -319,13 +320,15 @@ async function runSegmented(
       const submitted = await submitTask(segmentPayload(payload, piece))
       const finished = await waitForTask(submitted.task_id)
       if (finished.status !== 'succeeded') {
+        // Reuse the shared normaliser so an interrupted segment explains the
+        // restart (keys are never stored, so it must be resubmitted) instead
+        // of the generic "未知错误".
+        const fields = taskErrorFields(finished)
         throw new ApiError({
-          code: finished.error?.code || 'TASK_FAILED',
-          message:
-            `第 ${index + 1} 段生成失败：` +
-            (finished.error?.message || '未知错误') +
-            '。已完成的前几段已保存在历史记录中。',
-          detail: finished.error?.detail,
+          code: fields.code,
+          message: `第 ${index + 1} 段生成失败：${fields.message}。已完成的前几段已保存在历史记录中。`,
+          detail: fields.detail,
+          requestId: fields.requestId,
         })
       }
       const result = await fetchTaskResult(submitted.task_id)
@@ -368,7 +371,10 @@ function segmentPayload(payload: GenerateRequest, piece: string): GenerateReques
 async function waitForTask(taskId: string): Promise<TaskStatusResponse> {
   for (let attempt = 0; attempt < POLL_MAX_ATTEMPTS; attempt += 1) {
     const status = await fetchTask(taskId)
-    if (status.status === 'succeeded' || status.status === 'failed' || status.status === 'canceled') {
+    // Same closed rule as poll(): `interrupted` (among others) ends the wait.
+    // Without it a restarted server would make every remaining segment poll
+    // to the attempt cap, which looks like a hang rather than a lost task.
+    if (isTerminalStatus(status.status)) {
       return status
     }
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))

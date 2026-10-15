@@ -124,6 +124,7 @@ const statusOptions: { label: string; value: TaskStatus | '' }[] = [
   { label: '成功', value: 'succeeded' },
   { label: '失败', value: 'failed' },
   { label: '已取消', value: 'canceled' },
+  { label: '已中断', value: 'interrupted' },
 ]
 
 const statusFilter = computed<TaskStatus | ''>({
