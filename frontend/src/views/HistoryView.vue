@@ -4,7 +4,18 @@
  * (so only one track plays at a time), bulk deletion and a detail drawer.
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { Delete, Download, Headset, MagicStick, Refresh, Search, View } from '@element-plus/icons-vue'
+import {
+  Delete,
+  Download,
+  Headset,
+  MagicStick,
+  Plus,
+  Refresh,
+  Search,
+  Star,
+  StarFilled,
+  View,
+} from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
 import AudioPlayer from '@/components/AudioPlayer.vue'
@@ -12,7 +23,8 @@ import ErrorAlert from '@/components/ErrorAlert.vue'
 import MetricsPanel from '@/components/MetricsPanel.vue'
 import UsagePanel from '@/components/UsagePanel.vue'
 import { ApiError } from '@/api/http'
-import { audioUrl, deleteHistoryItem, fetchHistoryDetail } from '@/api'
+import { audioUrl, deleteHistoryItem, fetchHistoryDetail, updateHistory } from '@/api'
+import { MAX_TAG_COUNT, MAX_TAG_LENGTH, normalizeTags, sameTags } from '@/api/types'
 import type { HistoryDetail, HistoryItem, TaskStatus } from '@/api/types'
 import { useHistoryStore } from '@/stores/history'
 import { useConfigStore } from '@/stores/config'
@@ -135,6 +147,83 @@ const statusFilter = computed<TaskStatus | ''>({
   },
 })
 
+/* ------------------------- favorite / tag filters ------------------------ */
+
+/**
+ * Favourite filter. `''` is the "all" option and maps to `undefined` (no
+ * filter) rather than `false`, which would mean "non-favourites only".
+ */
+const favoriteFilter = computed<'all' | 'only' | 'none'>({
+  get: () => {
+    if (historyStore.favorite === undefined) return 'all'
+    return historyStore.favorite ? 'only' : 'none'
+  },
+  set: (value) => {
+    void historyStore.setFavorite(value === 'all' ? undefined : value === 'only')
+  },
+})
+
+const favoriteOptions = [
+  { label: '全部记录', value: 'all' as const },
+  { label: '仅看收藏', value: 'only' as const },
+  { label: '仅看未收藏', value: 'none' as const },
+]
+
+/**
+ * Tags available as filter chips: every distinct tag on the current page,
+ * plus whatever is already selected (so an active chip never disappears just
+ * because the filtered result set no longer contains it).
+ */
+const availableTags = computed<string[]>(() => {
+  const seen = new Set<string>(historyStore.tags)
+  for (const item of historyStore.items) {
+    for (const tag of item.tags ?? []) seen.add(tag)
+  }
+  return [...seen].sort((left, right) => left.localeCompare(right, 'zh-Hans-CN'))
+})
+
+const activeTags = computed<string[]>(() => historyStore.tags)
+
+function toggleTagFilter(tag: string): void {
+  void historyStore.toggleTag(tag)
+}
+
+function clearTagFilter(): void {
+  void historyStore.setTags([])
+}
+
+/* ------------------------------ star toggle ------------------------------ */
+
+/** Record ids with an in-flight PATCH, so the star cannot be double-clicked. */
+const starBusy = ref<Set<number>>(new Set())
+
+async function toggleFavorite(row: HistoryItem): Promise<void> {
+  if (starBusy.value.has(row.id)) return
+  const next = !row.favorite
+  starBusy.value = new Set(starBusy.value).add(row.id)
+  // Optimistic: flip immediately, then reconcile with the server. The drawer
+  // holds its own `HistoryDetail` object (a different instance from the store's
+  // list row), so both are updated; otherwise the drawer button would keep
+  // showing the stale label after a successful toggle.
+  row.favorite = next
+  historyStore.applyMetadata(row.id, { favorite: next })
+  try {
+    await updateHistory(row.id, { favorite: next })
+    // Reload only when the active filter could now exclude the row, so the
+    // visible list never contradicts the filter chip.
+    if (historyStore.favorite !== undefined) await historyStore.load()
+    ElMessage.success(next ? `已收藏记录 #${row.id}` : `已取消收藏 #${row.id}`)
+  } catch (caught) {
+    row.favorite = !next
+    historyStore.applyMetadata(row.id, { favorite: !next }) // roll back
+    ElMessage.error(caught instanceof ApiError ? caught.message : '更新收藏失败')
+  } finally {
+    const nextBusy = new Set(starBusy.value)
+    nextBusy.delete(row.id)
+    starBusy.value = nextBusy
+  }
+}
+
 /* ------------------------------- selection ------------------------------- */
 
 /** Ids selected via the table's checkbox column. */
@@ -216,6 +305,74 @@ async function openDetail(row: HistoryItem): Promise<void> {
 
 /** The drawer falls back to the list row while the detail request is in flight. */
 const drawerItem = computed<HistoryItem | null>(() => detail.value ?? null)
+
+/* ---------------------------- drawer tag editor --------------------------- */
+
+/** Working copy of the drawer row's tags; committed by 保存标签. */
+const tagDraft = ref<string[]>([])
+const tagInput = ref('')
+const tagSaving = ref(false)
+
+/** Re-seed the draft whenever a different record is loaded. */
+watch(
+  () => detail.value?.id,
+  () => {
+    tagDraft.value = [...(detail.value?.tags ?? [])]
+    tagInput.value = ''
+  },
+)
+
+/** Local validation feedback, mirroring the backend's rules. */
+const tagHint = computed<string>(() => {
+  if (tagDraft.value.length >= MAX_TAG_COUNT) return `最多 ${MAX_TAG_COUNT} 个标签`
+  return `最多 ${MAX_TAG_COUNT} 个标签，每个不超过 ${MAX_TAG_LENGTH} 个字符`
+})
+
+const tagDirty = computed<boolean>(() => !sameTags(tagDraft.value, detail.value?.tags ?? []))
+
+function addTag(): void {
+  const candidate = tagInput.value.trim()
+  if (!candidate) return
+  if (candidate.length > MAX_TAG_LENGTH) {
+    ElMessage.warning(`单个标签最长 ${MAX_TAG_LENGTH} 个字符`)
+    return
+  }
+  if (tagDraft.value.includes(candidate)) {
+    ElMessage.info('该标签已存在')
+    tagInput.value = ''
+    return
+  }
+  if (tagDraft.value.length >= MAX_TAG_COUNT) {
+    ElMessage.warning(`最多 ${MAX_TAG_COUNT} 个标签`)
+    return
+  }
+  tagDraft.value = [...tagDraft.value, candidate]
+  tagInput.value = ''
+}
+
+function removeTag(tag: string): void {
+  tagDraft.value = tagDraft.value.filter((item) => item !== tag)
+}
+
+async function saveTags(): Promise<void> {
+  const target = detail.value
+  if (!target) return
+  const next = normalizeTags(tagDraft.value)
+  tagSaving.value = true
+  try {
+    const updated = await updateHistory(target.id, { tags: next })
+    detail.value = updated
+    historyStore.applyMetadata(target.id, { tags: updated.tags })
+    tagDraft.value = [...updated.tags]
+    ElMessage.success('标签已保存')
+    // Tags are a filter dimension, so refresh when one is active.
+    if (historyStore.tags.length > 0) await historyStore.load()
+  } catch (caught) {
+    ElMessage.error(caught instanceof ApiError ? caught.message : '保存标签失败')
+  } finally {
+    tagSaving.value = false
+  }
+}
 
 /* --------------------------------- delete -------------------------------- */
 
@@ -359,6 +516,14 @@ watch(drawerVisible, (open) => {
               :value="item.value"
             />
           </el-select>
+          <el-select v-model="favoriteFilter" class="history-view__favorite" placeholder="收藏筛选">
+            <el-option
+              v-for="item in favoriteOptions"
+              :key="item.value"
+              :label="item.label"
+              :value="item.value"
+            />
+          </el-select>
         </div>
 
         <div class="history-view__toolbar-right">
@@ -390,6 +555,28 @@ watch(drawerVisible, (open) => {
           </el-button>
         </div>
       </div>
+
+      <div v-if="availableTags.length > 0" class="history-view__tag-filter">
+        <span class="history-view__tag-filter-label">标签</span>
+        <el-check-tag
+          v-for="tag in availableTags"
+          :key="tag"
+          :checked="activeTags.includes(tag)"
+          class="history-view__tag-chip"
+          @change="toggleTagFilter(tag)"
+        >
+          {{ tag }}
+        </el-check-tag>
+        <el-button
+          v-if="activeTags.length > 0"
+          link
+          type="primary"
+          size="small"
+          @click="clearTagFilter"
+        >
+          清除标签筛选
+        </el-button>
+      </div>
     </el-card>
 
     <ErrorAlert
@@ -420,6 +607,40 @@ watch(drawerVisible, (open) => {
         <el-table-column label="序号" width="70" align="center">
           <template #default="{ $index }">
             <span class="t2v-mono">{{ rowIndex($index) }}</span>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="收藏" width="70" align="center">
+          <template #default="{ row }">
+            <el-tooltip :content="row.favorite ? '取消收藏' : '收藏'" placement="top">
+              <el-button
+                size="small"
+                circle
+                :type="row.favorite ? 'warning' : 'default'"
+                :icon="row.favorite ? StarFilled : Star"
+                :loading="starBusy.has(row.id)"
+                :aria-label="row.favorite ? '取消收藏' : '收藏'"
+                @click="toggleFavorite(row)"
+              />
+            </el-tooltip>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="标签" min-width="140">
+          <template #default="{ row }">
+            <div v-if="row.tags && row.tags.length > 0" class="history-view__row-tags">
+              <el-tag
+                v-for="tag in row.tags"
+                :key="tag"
+                size="small"
+                effect="plain"
+                class="history-view__row-tag"
+                @click="toggleTagFilter(tag)"
+              >
+                {{ tag }}
+              </el-tag>
+            </div>
+            <span v-else class="history-view__muted">—</span>
           </template>
         </el-table-column>
 
@@ -628,6 +849,55 @@ watch(drawerVisible, (open) => {
           </el-descriptions>
 
           <section class="history-view__drawer-section">
+            <h4>收藏与标签</h4>
+            <div class="history-view__tag-editor">
+              <el-button
+                :type="drawerItem.favorite ? 'warning' : 'default'"
+                :icon="drawerItem.favorite ? StarFilled : Star"
+                size="small"
+                @click="toggleFavorite(drawerItem)"
+              >
+                {{ drawerItem.favorite ? '已收藏' : '收藏此记录' }}
+              </el-button>
+
+              <div class="history-view__tag-draft">
+                <el-tag
+                  v-for="tag in tagDraft"
+                  :key="tag"
+                  closable
+                  size="small"
+                  type="info"
+                  @close="removeTag(tag)"
+                >
+                  {{ tag }}
+                </el-tag>
+                <span v-if="tagDraft.length === 0" class="history-view__muted">暂无标签</span>
+              </div>
+
+              <div class="history-view__tag-input">
+                <el-input
+                  v-model="tagInput"
+                  size="small"
+                  :maxlength="MAX_TAG_LENGTH"
+                  placeholder="输入标签后回车添加"
+                  @keyup.enter="addTag"
+                />
+                <el-button size="small" :icon="Plus" @click="addTag">添加</el-button>
+              </div>
+              <p class="history-view__tag-hint">{{ tagHint }}</p>
+              <el-button
+                type="primary"
+                size="small"
+                :loading="tagSaving"
+                :disabled="!tagDirty"
+                @click="saveTags"
+              >
+                保存标签
+              </el-button>
+            </div>
+          </section>
+
+          <section class="history-view__drawer-section">
             <h4>输入文本</h4>
             <el-scrollbar max-height="180">
               <p class="t2v-scroll-text t2v-selectable">{{ drawerItem.input_text }}</p>
@@ -695,6 +965,81 @@ watch(drawerVisible, (open) => {
 
 .history-view__status {
   width: 150px;
+}
+
+.history-view__favorite {
+  width: 140px;
+}
+
+/* ---------------------------- tag filter row ----------------------------- */
+
+.history-view__tag-filter {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--t2v-border-color);
+}
+
+.history-view__tag-filter-label {
+  font-size: 13px;
+  color: var(--t2v-text-secondary);
+}
+
+.history-view__tag-chip {
+  cursor: pointer;
+}
+
+/* ------------------------------ table cells ------------------------------ */
+
+.history-view__row-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.history-view__row-tag {
+  cursor: pointer;
+}
+
+.history-view__muted {
+  color: var(--t2v-text-secondary);
+}
+
+/* ----------------------------- drawer editor ----------------------------- */
+
+.history-view__tag-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  background: var(--t2v-bg-muted);
+  border: 1px solid var(--t2v-border-color);
+  border-radius: var(--t2v-radius-sm);
+}
+
+.history-view__tag-draft {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 24px;
+  align-items: center;
+}
+
+.history-view__tag-input {
+  display: flex;
+  gap: 8px;
+}
+
+.history-view__tag-hint {
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  font-size: 12px;
+  color: var(--t2v-text-secondary);
 }
 
 .history-view__table-card :deep(.el-card__body) {

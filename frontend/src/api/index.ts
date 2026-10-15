@@ -3,7 +3,7 @@
  *
  * Every function rejects with an `ApiError` (see `./http`).
  */
-import { del, get, http, post, put } from './http'
+import { del, get, http, post, put, request } from './http'
 import type {
   CapabilitiesResponse,
   CloneVoiceRequest,
@@ -32,6 +32,7 @@ import type {
   TrimMediaRequest,
   TrimMediaResponse,
   UpdateSettingsRequest,
+  UpdateHistoryRequest,
   UsageQuery,
   UsageResponse,
   ValidateProviderRequest,
@@ -202,12 +203,26 @@ export function fetchHistory(query: HistoryQuery): Promise<HistoryListResponse> 
   }
   if (query.q) params.q = query.q
   if (query.status) params.status = query.status
+  // Only send `favorite` when the user actually picked a side: omitting it
+  // means "no filter", while `false` would mean "non-favourites only".
+  if (query.favorite !== undefined) params.favorite = query.favorite
+  if (query.tags && query.tags.length > 0) params.tags = query.tags.join(',')
   return get<HistoryListResponse>('/history', params)
 }
 
 /** `GET /history/{id}` — single record with latency details. */
 export function fetchHistoryDetail(id: number): Promise<HistoryDetail> {
   return get<HistoryDetail>(`/history/${id}`)
+}
+
+/** `PATCH /history/{id}` — set the favourite flag and/or replace the tag list. */
+export function updateHistory(
+  id: number,
+  payload: UpdateHistoryRequest,
+): Promise<HistoryDetail> {
+  // `http.ts` exposes no `patch` convenience wrapper; `request` is the same
+  // helper every other verb goes through, so failures still reject as ApiError.
+  return request<HistoryDetail>({ method: 'PATCH', url: `/history/${id}`, data: payload })
 }
 
 /** `DELETE /history/{id}` — delete one record (HTTP 204). */

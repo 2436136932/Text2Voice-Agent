@@ -11,6 +11,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
 
+from sqlalchemy import inspect
+from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -117,6 +119,76 @@ async def session_scope() -> AsyncIterator[AsyncSession]:
             raise
 
 
+# ---------------------------------------------------------------------------
+# Lightweight forward migration
+# ---------------------------------------------------------------------------
+#: Columns added to a pre-existing table *after* it shipped. ``create_all``
+#: only emits ``CREATE TABLE`` for tables that do not exist yet, so a table
+#: created by an older build keeps its old shape and every query touching a new
+#: column fails with ``sqlite3.OperationalError: no such column``. A real
+#: ``data/text2voice.db`` therefore needs an explicit ``ALTER TABLE``.
+#:
+#: Keep this list append-only: ``(table, column, DDL type + default)``. Every
+#: entry must be nullable or carry a SQL ``DEFAULT`` that matches the ORM
+#: default, because SQLite backfills existing rows from that default.
+_COLUMN_UPGRADES: tuple[tuple[str, str, str], ...] = (
+    ("generation_records", "favorite", "BOOLEAN NOT NULL DEFAULT 0"),
+    ("generation_records", "tags", "JSON NOT NULL DEFAULT '[]'"),
+)
+
+
+def _quote_sqlite_identifier(name: str) -> str:
+    """Quote an identifier for DDL interpolation.
+
+    Names come from the hard-coded list above, never from user input; the
+    guard exists so a future typo fails loudly instead of producing invalid SQL.
+    """
+    if not name or not all(char.isalnum() or char == "_" for char in name):
+        raise ValueError(f"unsafe SQL identifier: {name!r}")
+    return f'"{name}"'
+
+
+def _ensure_columns_sync(connection: Connection) -> list[str]:
+    """Add every missing column to SQLite tables. Returns ``table.column`` names added.
+
+    Must run inside a transaction *after* ``create_all``: for a brand-new
+    database the tables already have the columns and this is a no-op; for an
+    existing one the ``ALTER TABLE`` is what keeps the data readable. Nothing
+    is ever dropped, recreated or deleted here.
+    """
+    inspector = inspect(connection)
+    existing_tables = set(inspector.get_table_names())
+    added: list[str] = []
+
+    for table, column, ddl in _COLUMN_UPGRADES:
+        if table not in existing_tables:
+            continue  # create_all already emitted the current shape
+        current = {item["name"] for item in inspector.get_columns(table)}
+        if column in current:
+            continue
+        connection.exec_driver_sql(
+            f"ALTER TABLE {_quote_sqlite_identifier(table)} "
+            f"ADD COLUMN {_quote_sqlite_identifier(column)} {ddl}"
+        )
+        logger.info("schema migration: added column %s.%s", table, column)
+        added.append(f"{table}.{column}")
+
+    return added
+
+
+async def ensure_schema_columns(engine: AsyncEngine | None = None) -> list[str]:
+    """Forward-migrate an existing database so old tables gain new columns.
+
+    Safe to call on every startup: it only ever issues ``ALTER TABLE ADD
+    COLUMN`` for columns that are genuinely absent.
+    """
+    target = engine or get_engine()
+    async with target.begin() as connection:
+        # SQLite is the only backend that needs this today (PostgreSQL would
+        # need ``IF NOT EXISTS``); the inspector call is portable either way.
+        return await connection.run_sync(_ensure_columns_sync)
+
+
 async def init_db() -> None:
     """Create tables, indexes and the settings singleton row."""
     from app.db import models  # noqa: F401  (register metadata)
@@ -124,7 +196,13 @@ async def init_db() -> None:
     engine = get_engine()
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
-    logger.info("database schema ready tables=%s", sorted(Base.metadata.tables))
+    # Backfill columns on tables that predate them (see _COLUMN_UPGRADES).
+    added = await ensure_schema_columns(engine)
+    logger.info(
+        "database schema ready tables=%s migrated_columns=%s",
+        sorted(Base.metadata.tables),
+        added,
+    )
 
     async with session_scope() as session:
         await models.SettingModel.get_or_create(session)

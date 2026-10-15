@@ -12,10 +12,28 @@ from app.schemas.generation import (
     HistoryDeleteResponse,
     HistoryItem,
     HistoryListResponse,
+    HistoryUpdateRequest,
 )
 from app.services.history import history_service
 
 router = APIRouter(prefix="/history", tags=["历史记录 History"])
+
+
+def _parse_tags(tags: list[str] | None) -> list[str] | None:
+    """Accept ``?tags=a&tags=b`` **and** ``?tags=a,b``.
+
+    Whitespace is trimmed and empties dropped here; the service applies the
+    full normalization (dedupe, length and count caps).
+    """
+    if not tags:
+        return None
+    parsed: list[str] = []
+    for raw in tags:
+        for part in raw.split(","):
+            tag = part.strip()
+            if tag and tag not in parsed:
+                parsed.append(tag)
+    return parsed or None
 
 
 @router.get(
@@ -23,7 +41,8 @@ router = APIRouter(prefix="/history", tags=["历史记录 History"])
     response_model=HistoryListResponse,
     summary="分页查询历史记录",
     description=(
-        "支持全文搜索（`q` 同时匹配输入文本与回复文本）与状态过滤。"
+        "支持全文搜索（`q` 同时匹配输入文本与回复文本，`%`/`_` 按字面匹配）、"
+        "状态过滤、收藏过滤（`favorite`）与标签过滤（`tags` 可重复或逗号分隔）。"
         "`audio_url` 可直接用于 `<audio>` 播放或下载。"
     ),
 )
@@ -37,6 +56,13 @@ async def list_history(
         Query(alias="status", pattern="^(pending|running|succeeded|failed|canceled)$"),
     ] = None,
     provider: Annotated[str | None, Query(max_length=32, description="按服务商过滤")] = None,
+    favorite: Annotated[
+        bool | None, Query(description="仅看收藏（true）/仅看未收藏（false）")
+    ] = None,
+    tags: Annotated[
+        list[str] | None,
+        Query(description="按标签过滤；可重复传参或用逗号分隔"),
+    ] = None,
 ) -> HistoryListResponse:
     return await history_service.list(
         session,
@@ -45,6 +71,8 @@ async def list_history(
         query=q,
         status=status_filter,
         provider=provider,
+        favorite=favorite,
+        tags=_parse_tags(tags),
     )
 
 
@@ -97,6 +125,33 @@ async def delete_history(
 )
 async def get_history(record_id: int, session: SessionDep, _: RateLimitDefault) -> HistoryItem:
     return await history_service.get_item(session, record_id)
+
+
+@router.patch(
+    "/{record_id}",
+    response_model=HistoryItem,
+    summary="更新历史记录的收藏/标签",
+    description=(
+        "部分更新：只提交需要修改的字段。`tags` 会去除空白、丢弃空项、去重，"
+        "单个标签最长 32 字符、最多 20 个。"
+    ),
+    responses={
+        404: {"description": "记录不存在"},
+        422: {"description": "标签无效（非数组/过长/过多）"},
+    },
+)
+async def update_history(
+    record_id: int,
+    payload: HistoryUpdateRequest,
+    session: SessionDep,
+    _: RateLimitDefault,
+) -> HistoryItem:
+    return await history_service.update(
+        session,
+        record_id,
+        favorite=payload.favorite,
+        tags=payload.tags,
+    )
 
 
 @router.delete(

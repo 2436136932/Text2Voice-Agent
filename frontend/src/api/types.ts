@@ -447,6 +447,10 @@ export interface HistoryItem {
   status: TaskStatus
   degraded: boolean
   error_code: string | null
+  /** Starred by the user via `PATCH /history/{id}`. */
+  favorite: boolean
+  /** User labels; always an array (backend caps count and length). */
+  tags: string[]
   created_at: string
   audio_url: string
 }
@@ -464,6 +468,49 @@ export interface HistoryQuery {
   page_size: number
   q?: string
   status?: TaskStatus | ''
+  /** `true` = favourites only, `false` = non-favourites only, omitted = all. */
+  favorite?: boolean
+  /** Tags to filter by; sent as a comma-separated `tags` parameter. */
+  tags?: string[]
+}
+
+/**
+ * Body of `PATCH /history/{id}`. Both fields are optional; omit one to leave
+ * it untouched. Tags are normalized server-side (trim, drop empty, dedupe).
+ */
+export interface UpdateHistoryRequest {
+  favorite?: boolean
+  tags?: string[]
+}
+
+/** Mirrors the backend's tag limits (`app/schemas/generation.py`). */
+export const MAX_TAG_COUNT = 20
+export const MAX_TAG_LENGTH = 32
+
+/**
+ * Normalize tags for display/sending, mirroring the backend rule.
+ *
+ * Used by the drawer editor so the user sees exactly what the server will
+ * store (a tag that is only whitespace never reaches the API as an empty
+ * chip), and by the unit tests as the pure helper under test.
+ */
+export function normalizeTags(tags: readonly string[]): string[] {
+  const out: string[] = []
+  for (const raw of tags) {
+    const tag = raw.trim()
+    if (!tag || tag.length > MAX_TAG_LENGTH) continue
+    if (!out.includes(tag)) out.push(tag)
+    if (out.length >= MAX_TAG_COUNT) break
+  }
+  return out
+}
+
+/**
+ * True when `left` and `right` hold the same tags in the same order.
+ * The drawer uses it to disable the save button until something changed.
+ */
+export function sameTags(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((tag, index) => tag === right[index])
 }
 
 export interface HistoryListResponse {

@@ -15,6 +15,14 @@ export interface HistoryState {
   query: string
   /** Status filter; empty string means "all". */
   status: TaskStatus | ''
+  /**
+   * Favourite filter: `undefined` = no filter, `true` = favourites only,
+   * `false` = non-favourites only. `undefined` is distinct from `false`
+   * because "no favourite filter" must not mean "hide favourites".
+   */
+  favorite?: boolean
+  /** Active tag filter (OR semantics); empty array = no tag filter. */
+  tags: string[]
   loading: boolean
   error: string | null
   /** Row ids currently selected in the table. */
@@ -30,6 +38,8 @@ export const useHistoryStore = defineStore('history', {
     pages: 1,
     query: '',
     status: '',
+    favorite: undefined,
+    tags: [],
     loading: false,
     error: null,
     selection: [],
@@ -58,6 +68,8 @@ export const useHistoryStore = defineStore('history', {
           page_size: this.pageSize,
           q: this.query,
           status: this.status,
+          favorite: this.favorite,
+          tags: this.tags,
         })
         this.items = response.items
         this.total = response.total
@@ -104,6 +116,58 @@ export const useHistoryStore = defineStore('history', {
       await this.load()
     },
 
+    /**
+     * Apply the favourite filter and reload from page 1.
+     * Pass `undefined` for "all records".
+     */
+    async setFavorite(favorite: boolean | undefined): Promise<void> {
+      this.favorite = favorite
+      this.page = 1
+      await this.load()
+    },
+
+    /** Apply a tag filter (OR semantics) and reload from page 1. */
+    async setTags(tags: string[]): Promise<void> {
+      this.tags = [...tags]
+      this.page = 1
+      await this.load()
+    },
+
+    /** Add or remove one tag from the active filter. */
+    async toggleTag(tag: string): Promise<void> {
+      const next = this.tags.includes(tag)
+        ? this.tags.filter((item) => item !== tag)
+        : [...this.tags, tag]
+      await this.setTags(next)
+    },
+
+    /**
+     * Update one row's metadata in place after a successful `PATCH`.
+     *
+     * Avoids a full reload so the page, scroll position and selection stay put
+     * when the user only clicked a star.
+     */
+    applyMetadata(
+      id: number,
+      patch: { favorite?: boolean; tags?: string[] },
+    ): void {
+      const row = this.items.find((item) => item.id === id)
+      if (!row) return
+      if (patch.favorite !== undefined) row.favorite = patch.favorite
+      if (patch.tags !== undefined) row.tags = [...patch.tags]
+    },
+
+    /** Replace a row's metadata and reload (used when a filter may exclude it). */
+    async applyMetadataAndReload(
+      id: number,
+      patch: { favorite?: boolean; tags?: string[] },
+    ): Promise<void> {
+      this.applyMetadata(id, patch)
+      // A row can drop out of the current filtered view (e.g. un-starring while
+      // the "favourites only" filter is active), so re-fetch to stay truthful.
+      await this.load()
+    },
+
     /** Replace the row selection. */
     setSelection(ids: number[]): void {
       this.selection = ids
@@ -142,6 +206,10 @@ export const useHistoryStore = defineStore('history', {
       this.total = 0
       this.page = 1
       this.pages = 1
+      this.query = ''
+      this.status = ''
+      this.favorite = undefined
+      this.tags = []
       this.selection = []
       this.error = null
     },

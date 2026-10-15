@@ -327,6 +327,40 @@ class TaskStatusResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # History
 # ---------------------------------------------------------------------------
+#: Tag limits enforced by the API and mirrored in the UI.
+MAX_TAG_COUNT = 20
+MAX_TAG_LENGTH = 32
+
+
+def normalize_tags(value: object) -> list[str]:
+    """Normalize a user-supplied tag list.
+
+    Strips surrounding whitespace, drops empty entries, de-duplicates
+    (case-sensitively, preserving first-seen order) and enforces the count and
+    per-tag length limits. A non-list input raises ``ValueError`` so the route
+    can surface ``VALIDATION_ERROR`` instead of silently coercing.
+    """
+    if not isinstance(value, list):
+        raise ValueError("tags 必须是字符串数组")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError("tags 中的每一项都必须是字符串")
+        tag = item.strip()
+        if not tag:
+            continue
+        if len(tag) > MAX_TAG_LENGTH:
+            raise ValueError(f"单个标签最长 {MAX_TAG_LENGTH} 个字符：{tag[:MAX_TAG_LENGTH]}…")
+        if tag in seen:
+            continue
+        seen.add(tag)
+        normalized.append(tag)
+    if len(normalized) > MAX_TAG_COUNT:
+        raise ValueError(f"标签数量最多 {MAX_TAG_COUNT} 个")
+    return normalized
+
+
 class HistoryItem(BaseModel):
     id: int
     input_text: str
@@ -348,8 +382,38 @@ class HistoryItem(BaseModel):
     degraded_reason: str | None = None
     error_code: str | None = None
     error_message: str | None = None
+    #: Starred by the user (see ``PATCH /history/{id}``).
+    favorite: bool = False
+    #: User labels; always a list (never null), capped by ``MAX_TAG_COUNT``.
+    tags: list[str] = Field(default_factory=list)
     created_at: AwareUTC | None = None
     audio_url: str | None = None
+
+
+class HistoryUpdateRequest(BaseModel):
+    """Body of ``PATCH /history/{id}`` — both fields are optional.
+
+    Only the fields actually present are applied, so the UI can toggle a star
+    without sending (or clobbering) the tag list, and vice versa. ``tags`` is
+    validated through :func:`normalize_tags`; sending a non-list is a
+    ``VALIDATION_ERROR`` rather than a silent no-op.
+    """
+
+    favorite: bool | None = None
+    tags: list[str] | None = None
+
+    @field_validator("tags")
+    @classmethod
+    def _check_tags(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        return normalize_tags(value)
+
+    @model_validator(mode="after")
+    def _at_least_one(self) -> "HistoryUpdateRequest":
+        if self.favorite is None and self.tags is None:
+            raise ValueError("请至少提供 favorite 或 tags 之一")
+        return self
 
 
 class HistoryListResponse(BaseModel):

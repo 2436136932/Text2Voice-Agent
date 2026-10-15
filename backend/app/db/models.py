@@ -90,6 +90,15 @@ class GenerationRecord(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     request_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
+    # -- user metadata (favourites / tags) ----------------------------------
+    #: Starred by the user. Indexed because the "only favourites" filter is a
+    #: single-column predicate over the newest rows.
+    favorite: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    #: Free-form labels, stored as a JSON array. SQLite has no array type, and
+    #: the only queries we run are "contains tag X" over a small tagged subset,
+    #: so a JSON column keeps the schema simple (see ``history_service.list``).
+    tags: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow, server_default=func.now()
     )
@@ -99,6 +108,20 @@ class GenerationRecord(Base):
         Index("ix_records_status", "status"),
         Index("ix_records_provider", "llm_provider", "tts_provider"),
     )
+
+    @property
+    def tag_list(self) -> list[str]:
+        """``tags`` as a plain ``list[str]``.
+
+        Rows written before the column existed (or by a raw ``ALTER TABLE``)
+        can hold ``None``; the API contract is "always a list".
+        """
+        value = self.tags
+        if not value:
+            return []
+        if isinstance(value, str):  # pragma: no cover - defensive: legacy text
+            return [item for item in (part.strip() for part in value.split(",")) if item]
+        return [str(item) for item in value]
 
     @property
     def audio_url(self) -> str:
@@ -131,6 +154,8 @@ class GenerationRecord(Base):
             "degraded_reason": self.degraded_reason,
             "error_code": self.error_code,
             "error_message": self.error_message,
+            "favorite": bool(self.favorite),
+            "tags": self.tag_list,
             "created_at": iso_utc(self.created_at),
             "audio_url": self.audio_url if self.status == "succeeded" else None,
         }

@@ -4,21 +4,53 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import Text, cast, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError, ErrorCode
 from app.core.logging import get_logger
 from app.db.models import GenerationRecord
-from app.schemas.generation import HistoryItem, HistoryListResponse
+from app.schemas.generation import HistoryItem, HistoryListResponse, normalize_tags
 from app.services.audio import audio_store
 
 logger = get_logger(__name__)
 
 MAX_PAGE_SIZE = 100
+
+
+#: LIKE escape character used by :meth:`HistoryService.list`. Chosen because it
+#: is not special in SQL LIKE and is unlikely to appear in search text.
+LIKE_ESCAPE = "\\"
+
+
+def escape_like(value: str) -> str:
+    """Escape SQL ``LIKE`` wildcards so the user's text is matched literally.
+
+    Without this, searching for ``%`` matches every row and ``_`` matches any
+    single character — surprising, and it also makes the search box a cheap way
+    to force a full table scan. Pairs with ``escape=LIKE_ESCAPE`` on the
+    ``ilike`` call.
+    """
+    return value.replace(LIKE_ESCAPE, LIKE_ESCAPE * 2).replace("%", "\\%").replace("_", "\\_")
+
+
+def tag_needles(tag: str) -> list[str]:
+    """The serialized forms of ``tag`` as they appear inside the JSON column.
+
+    ``json.dumps`` (what SQLAlchemy's JSON type writes) escapes non-ASCII
+    characters, so a Chinese tag is physically stored as ``["\\u5de5\\u4f5c"]``.
+    Both encodings are valid JSON and a non-ASCII-preserving writer would
+    produce the literal form, so both are matched; ASCII tags have a single
+    representation and yield one needle.
+    """
+    compact = json.dumps(tag, ensure_ascii=False, separators=(",", ":"))
+    if compact.isascii():
+        return [compact]
+    return [compact, json.dumps(tag, separators=(",", ":"))]
 
 
 class HistoryService:
@@ -33,17 +65,19 @@ class HistoryService:
         query: str | None = None,
         status: str | None = None,
         provider: str | None = None,
+        favorite: bool | None = None,
+        tags: list[str] | None = None,
     ) -> HistoryListResponse:
         page = max(1, page)
         page_size = max(1, min(MAX_PAGE_SIZE, page_size))
 
         conditions = []
         if query:
-            pattern = f"%{query.strip()}%"
+            pattern = f"%{escape_like(query.strip())}%"
             conditions.append(
                 or_(
-                    GenerationRecord.input_text.ilike(pattern),
-                    GenerationRecord.reply_text.ilike(pattern),
+                    GenerationRecord.input_text.ilike(pattern, escape=LIKE_ESCAPE),
+                    GenerationRecord.reply_text.ilike(pattern, escape=LIKE_ESCAPE),
                 )
             )
         if status:
@@ -55,6 +89,21 @@ class HistoryService:
                     GenerationRecord.tts_provider == provider,
                 )
             )
+        if favorite is not None:
+            conditions.append(GenerationRecord.favorite.is_(favorite))
+        if tags:
+            # ``tags`` is a JSON array column, so membership is tested by
+            # matching the serialized element inside the array text. The quoted
+            # needle keeps a tag like ``日报`` from also matching ``本周日报``.
+            # Multiple tags are OR-ed: the UI sends the set of chips the user
+            # ticked, and "any of the selected tags" is what a filter means.
+            serialized = cast(GenerationRecord.tags, Text)
+            tag_matches = [
+                serialized.like(f"%{escape_like(needle)}%", escape=LIKE_ESCAPE)
+                for tag in tags
+                for needle in tag_needles(tag)
+            ]
+            conditions.append(or_(*tag_matches))
 
         base = select(GenerationRecord)
         counter = select(func.count()).select_from(GenerationRecord)
@@ -92,6 +141,33 @@ class HistoryService:
 
     async def get_item(self, session: AsyncSession, record_id: int) -> HistoryItem:
         return self._to_item(await self.get(session, record_id))
+
+    async def update(
+        self,
+        session: AsyncSession,
+        record_id: int,
+        *,
+        favorite: bool | None = None,
+        tags: list[str] | None = None,
+    ) -> HistoryItem:
+        """Set ``favorite`` and/or ``tags``; omitted fields are left untouched.
+
+        ``tags`` is normalized here as well as in the schema so service-level
+        callers (and future routes) get the same dedupe/trim/cap guarantees.
+        """
+        row = await self.get(session, record_id)
+        if favorite is not None:
+            row.favorite = bool(favorite)
+        if tags is not None:
+            row.tags = normalize_tags(tags)
+        await session.flush()
+        logger.info(
+            "history record updated record_id=%s favorite=%s tags=%s",
+            record_id,
+            favorite,
+            len(row.tag_list),
+        )
+        return self._to_item(row)
 
     async def delete(self, session: AsyncSession, record_id: int) -> bool:
         row = await session.get(GenerationRecord, record_id)
