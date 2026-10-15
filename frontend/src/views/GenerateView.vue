@@ -33,7 +33,15 @@ import type {
 } from '@/api/types'
 import { MAX_TEXT_LENGTH, useConfigStore, type GenerationMode } from '@/stores/config'
 import { stageLabel } from '@/utils/format'
-import { isTerminalStatus, taskErrorFields } from '@/utils/taskStatus'
+import {
+  canRunSegment,
+  cancelRun,
+  isTerminalStatus,
+  segmentCancelSummary,
+  startRun,
+  taskErrorFields,
+  type SegmentRunToken,
+} from '@/utils/taskStatus'
 import { segmentText } from '@/utils/segment'
 
 const configStore = useConfigStore()
@@ -61,6 +69,39 @@ const segmentResults = ref<GenerateResponse[]>([])
 const segmentIndex = ref(0)
 const segmentTotal = ref(0)
 
+/**
+ * Cancellation signal for the segmented run.
+ *
+ * `segmentRunToken` is the token the *live* run owns; `segmentCanceled` is the
+ * explicit 停止生成 flag. Both are needed: the token stops a stale in-flight
+ * `await` from resuming after a newer run started, the flag stops the loop the
+ * user actually pressed cancel on. See SegmentRunToken in utils/taskStatus.
+ */
+const segmentRunToken = ref(0)
+const segmentCanceled = ref(false)
+
+/**
+ * The task id of the segment that is genuinely in flight right now.
+ *
+ * The segmented loop used to keep its task id in a local variable, so
+ * `handleCancel()` read the *stale* `task.value` from an earlier single
+ * generation (or from nothing at all) and asked the backend to cancel a task
+ * that was already finished — while every remaining segment kept being
+ * submitted. This ref is the id cancel must target.
+ */
+const currentTaskId = ref<string | null>(null)
+
+/** Snapshot of the pure cancellation signal, for the helper functions. */
+function runSignal(): SegmentRunToken {
+  return { current: segmentRunToken.value, canceled: segmentCanceled.value }
+}
+
+/** Apply a helper's verdict back onto the reactive refs. */
+function applySignal(next: SegmentRunToken): void {
+  segmentRunToken.value = next.current
+  segmentCanceled.value = next.canceled
+}
+
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let tickTimer: ReturnType<typeof setInterval> | null = null
 let pollStartedAt = 0
@@ -76,7 +117,13 @@ const progress = computed(() => {
   return Math.min(100, Math.max(0, task.value?.progress ?? 0))
 })
 const stageMessage = computed(() => {
-  if (segmented.value) return '长文本分段生成中，每段完成后自动继续'
+  if (segmented.value) {
+    // Only promise auto-continue while the run is actually live: after 停止生成
+    // the old text ("每段完成后自动继续") directly contradicted what the loop
+    // was doing, which is what made the original bug so confusing.
+    if (segmentCanceled.value) return '正在停止：后续分段不再提交'
+    return '长文本分段生成中，每段完成后自动继续，可随时停止'
+  }
   return task.value?.message ?? ''
 })
 const elapsedText = computed(() => `${elapsedSeconds.value}s`)
@@ -178,6 +225,10 @@ function stopTimers(): void {
 function finish(): void {
   stopTimers()
   generating.value = false
+  // Every run ends here, so this is the one place that guarantees the next run
+  // starts from a clean signal (fix 6).
+  currentTaskId.value = null
+  segmentCanceled.value = false
 }
 
 async function loadResult(taskId: string): Promise<void> {
@@ -236,6 +287,10 @@ async function runGeneration(overrides?: Partial<GenerateOptions>): Promise<void
   result.value = null
   task.value = null
   elapsedSeconds.value = 0
+  // Starting a run invalidates any in-flight segment loop from an earlier run:
+  // its token no longer matches, so it cannot resume submitting (fix 1).
+  applySignal(startRun(runSignal()))
+  currentTaskId.value = null
 
   let payload
   try {
@@ -258,6 +313,7 @@ async function runGeneration(overrides?: Partial<GenerateOptions>): Promise<void
   generating.value = true
   try {
     const submitted = await submitTask(payload)
+    currentTaskId.value = submitted.task_id
     task.value = {
       task_id: submitted.task_id,
       status: submitted.status,
@@ -293,6 +349,12 @@ async function runGeneration(overrides?: Partial<GenerateOptions>): Promise<void
  * one starts: sequential submission keeps us inside the expensive-endpoint rate
  * limit and gives the user a meaningful progress count ("第 3 / 12 段").
  * Results accumulate in `segments` for the result panel's playlist.
+ *
+ * Cancellation (the 停止生成 button) must stop *submission*, not just the one
+ * in-flight segment: every vendor call costs money, so the loop re-checks its
+ * run token before each submit and again after each await. The token, not a
+ * boolean, is what makes the check safe against a stale await waking up after
+ * a newer run has already started.
  */
 async function runSegmented(
   payload: GenerateRequest,
@@ -306,19 +368,76 @@ async function runSegmented(
   error.value = null
   pollStartedAt = Date.now()
 
+  // This run owns the newest token; a later runGeneration() bumps it again.
+  applySignal(startRun(runSignal()))
+  const token = segmentRunToken.value
+
   const startedAt = Date.now()
   tickTimer = setInterval(() => {
     elapsedSeconds.value = Math.round((Date.now() - startedAt) / 1000)
   }, 1000)
 
+  let canceled = false
   try {
     for (let index = 0; index < pieces.length; index += 1) {
-      segmentIndex.value = index + 1
+      // Fix 2, first checkpoint: an explicit cancel (or a newer run that stole
+      // the token) must stop us *before* we spend money on another segment.
+      if (!canRunSegment(runSignal(), token)) {
+        canceled = true
+        break
+      }
+
       const piece = pieces[index]
       if (piece === undefined) continue
+      segmentIndex.value = index + 1
 
       const submitted = await submitTask(segmentPayload(payload, piece))
+      // Fix 3: point the page at the segment that is genuinely in flight, so
+      // handleCancel() cancels the right task id.
+      currentTaskId.value = submitted.task_id
+      task.value = {
+        task_id: submitted.task_id,
+        status: submitted.status,
+        stage: submitted.stage,
+        progress: submitted.progress,
+        message: submitted.message,
+        created_at: null,
+        started_at: null,
+        finished_at: null,
+        elapsed_ms: null,
+        error: null,
+      }
+
+      // Fix 2, second checkpoint: cancel may land while this segment runs; the
+      // await above resolved, so re-read the signal before interpreting the
+      // status (a canceled task is an expected outcome, not a failure).
+      const stoppedMidSegment = !canRunSegment(runSignal(), token)
+
       const finished = await waitForTask(submitted.task_id)
+      const stillLive = canRunSegment(runSignal(), token)
+
+      if (!stillLive || stoppedMidSegment) {
+        // Fix 5: cancellation is a clean, non-error exit. If the segment did
+        // finish successfully before the cancel was observed, keep its result —
+        // we paid for it, so it must not be discarded.
+        if (finished.status === 'succeeded' && stoppedMidSegment) {
+          try {
+            const result = await fetchTaskResult(submitted.task_id)
+            segmentResults.value = [...segmentResults.value, result]
+          } catch {
+            // Best effort; the record is in history regardless.
+          }
+        }
+        canceled = true
+        break
+      }
+
+      if (finished.status === 'canceled') {
+        // Backend-side cancellation (same click, different arrival order).
+        canceled = true
+        break
+      }
+
       if (finished.status !== 'succeeded') {
         // Reuse the shared normaliser so an interrupted segment explains the
         // restart (keys are never stored, so it must be resubmitted) instead
@@ -334,8 +453,18 @@ async function runSegmented(
       const result = await fetchTaskResult(submitted.task_id)
       segmentResults.value = [...segmentResults.value, result]
     }
-    ElMessage.success(`${pieces.length} 段全部生成完成`)
-    // Focus the first segment in the result card.
+
+    const completed = segmentResults.value.length
+    if (canceled) {
+      // Fix 4: never the "all segments generated" toast on a canceled run.
+      const message = segmentCancelSummary(completed, pieces.length)
+      segmentIndex.value = completed
+      ElMessage.info(message)
+    } else {
+      ElMessage.success(`${pieces.length} 段全部生成完成`)
+    }
+    // Focus the first segment in the result card; on a canceled run this keeps
+    // whatever the user already has instead of blanking the panel.
     result.value = segmentResults.value[0] ?? null
   } catch (caught) {
     error.value = caught instanceof ApiError ? caught : null
@@ -389,10 +518,36 @@ function handleRetry(): void {
   void runGeneration()
 }
 
-/** Cancel the in-flight task: stop polling and tell the backend to abort. */
+/**
+ * Cancel the in-flight task: stop the local loop *first*, then tell the
+ * backend to abort.
+ *
+ * Ordering matters. The cancel flag is set before the `await cancelTask(...)`
+ * round-trip so the segmented loop cannot slip another paid segment in while
+ * the HTTP request is in flight — the loop re-reads the signal at each
+ * checkpoint, and a single microtask earlier is a whole vendor call cheaper.
+ */
 async function handleCancel(): Promise<void> {
-  const taskId = task.value?.task_id
-  if (!taskId) return
+  // Fix 1/2: stop the segmented loop from submitting anything further. Scoped
+  // to the live token so this cannot be mistaken for a newer run.
+  if (segmented.value) {
+    applySignal(cancelRun(runSignal(), segmentRunToken.value))
+  }
+
+  // Fix 3: the genuinely in-flight segment id, not a stale `task.value` from an
+  // earlier run. Falls back to task.value for the single-generation path.
+  const taskId = currentTaskId.value ?? task.value?.task_id
+  if (!taskId) {
+    // Nothing is in flight (e.g. cancel pressed between segments): the loop
+    // check above already stopped the run, so there is nothing to abort.
+    if (segmented.value) {
+      ElMessage.info('已取消：后续分段不再提交。')
+      finish()
+      segmented.value = false
+    }
+    return
+  }
+
   canceling.value = true
   try {
     await cancelTask(taskId)
@@ -401,13 +556,16 @@ async function handleCancel(): Promise<void> {
     // The task may have finished between the click and the call — poll will
     // pick up the terminal state on its next tick, so a missed cancel is
     // harmless. Only network-level failures surface here.
-    ElMessage.warning('取消请求失败，任务可能已完成')
+    if (!segmented.value) ElMessage.warning('取消请求失败，任务可能已完成')
   } finally {
     canceling.value = false
   }
-  // Stop the local UI immediately; the poll handler turns the eventual
-  // 'canceled' status into the standard error display if it lands.
-  finish()
+  // Single generation: stop the local UI immediately (the poll handler turns
+  // the eventual 'canceled' status into the standard error display if it
+  // lands). The segmented path must NOT finish() here: its loop is still
+  // awaiting this segment and owns the honest summary, so it stops itself at
+  // the next checkpoint and reports N/M completed.
+  if (!segmented.value) finish()
 }
 
 function handleRegenerate(): void {
@@ -640,7 +798,7 @@ const referenceHint = computed<string>(() => {
                 :loading="canceling"
                 @click="handleCancel"
               >
-                停止生成
+                {{ segmented ? '停止生成（不再提交后续分段）' : '停止生成' }}
               </el-button>
             </div>
           </div>

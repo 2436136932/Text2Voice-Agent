@@ -46,6 +46,69 @@ export function isTerminalStatus(status: string | null | undefined): boolean {
   return !NON_TERMINAL_STATUSES.includes(status as TaskStatus)
 }
 
+/* ------------------- segmented-run cancellation (run token) ------------------- */
+
+/**
+ * The cancellation signal for a segmented (long-text) run.
+ *
+ * A plain boolean is not enough. `runSegmented()` awaits the network between
+ * segments, and a user can press 停止生成 and immediately start a *new* run
+ * while the old one is still parked inside `await waitForTask(...)`. When that
+ * old await resolves it would read "canceled === false" (the new run cleared
+ * the flag) and carry on submitting paid segments.
+ *
+ * A monotonic token fixes that: every run records the token it owns at start
+ * and the only thing that can invalidate it is a *newer* run (or an explicit
+ * cancel). A stale run's token can never match again.
+ */
+export interface SegmentRunToken {
+  /** Token owned by the run that is live right now. */
+  readonly current: number
+  /** Explicit cancel: set by 停止生成, cleared when a fresh run starts. */
+  readonly canceled: boolean
+}
+
+/** A fresh signal: token 0, not canceled. */
+export function newRunToken(): SegmentRunToken {
+  return { current: 0, canceled: false }
+}
+
+/** Start a run: takes the next token and clears any previous cancel. */
+export function startRun(signal: SegmentRunToken): SegmentRunToken {
+  return { current: signal.current + 1, canceled: false }
+}
+
+/** Cancel the run identified by `token` (a no-op if a newer run already owns it). */
+export function cancelRun(signal: SegmentRunToken, token: number): SegmentRunToken {
+  if (signal.current !== token) return signal
+  return { current: signal.current, canceled: true }
+}
+
+/**
+ * Whether `token` may still submit its next segment.
+ *
+ * False when the run was canceled, and false when its token was superseded by
+ * a newer run — the two ways the loop must stop spending money.
+ */
+export function canRunSegment(signal: SegmentRunToken, token: number): boolean {
+  return signal.current === token && !signal.canceled
+}
+
+/**
+ * The honest summary shown when a segmented run stops early.
+ *
+ * Deliberately never the "全部生成完成" success wording: the completed
+ * segments are kept (they are already separate records in history) but the
+ * remaining ones were never submitted, and saying otherwise would hide that
+ * the user did not get the whole document.
+ */
+export function segmentCancelSummary(completed: number, total: number): string {
+  if (completed <= 0) {
+    return `已取消：0 / ${total} 段已完成，本次未提交任何分段。`
+  }
+  return `已取消：已完成 ${completed} / ${total} 段，剩余分段不再提交。已完成的分段已保存在历史记录中。`
+}
+
 /** The subset of the task-status response this module needs. */
 export interface TerminalTaskLike {
   status: string
