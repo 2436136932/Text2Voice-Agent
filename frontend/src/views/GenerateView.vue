@@ -31,7 +31,7 @@ import type {
   MediaInfo,
   TaskStatusResponse,
 } from '@/api/types'
-import { MAX_TEXT_LENGTH, useConfigStore, type GenerationMode } from '@/stores/config'
+import { useConfigStore, type GenerationMode } from '@/stores/config'
 import { stageLabel } from '@/utils/format'
 import {
   canRunSegment,
@@ -304,7 +304,13 @@ async function runGeneration(overrides?: Partial<GenerateOptions>): Promise<void
   // boundaries and queue each piece. Chunks run through the same task queue
   // (sequentially, to stay inside the rate limit) and land in history as
   // separate records, so one failed segment can be regenerated alone.
-  const { segments, single } = segmentText(configStore.text, { limit: MAX_TEXT_LENGTH })
+  //
+  // The limit comes from the store (`segmentLimit`), not a constant: each TTS
+  // provider declares its own max_chars and splitting at the pipeline limit
+  // produced segments the provider rejected outright (see utils/providerLimit).
+  const { segments, single } = segmentText(configStore.text, {
+    limit: configStore.segmentLimit,
+  })
   if (!single && segments.length > 1) {
     await runSegmented(payload, segments)
     return

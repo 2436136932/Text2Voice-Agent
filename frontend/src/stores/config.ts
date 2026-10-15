@@ -12,6 +12,7 @@
  */
 import { defineStore } from 'pinia'
 import { fetchProviders } from '@/api'
+import { effectiveSegmentLimit } from '@/utils/providerLimit'
 import type {
   GenerateOptions,
   GenerateRequest,
@@ -182,6 +183,19 @@ export const useConfigStore = defineStore('config', {
     ttsProvider(state): TTSProvider | null {
       if (!state.providers) return null
       return state.providers.tts.find((item) => item.id === state.ttsProviderId) ?? null
+    },
+
+    /**
+     * Real per-segment character limit for the selected TTS provider.
+     *
+     * The pipeline limit (MAX_TEXT_LENGTH) is only an upper bound: providers
+     * declare a tighter `max_chars` (volcengine 1024, edge 3000, mimo 4000,
+     * openai 4096) and splitting at 5000 regardless produced segments the
+     * backend rejected outright. Every split site must read the limit from
+     * here so the count shown and the requests sent cannot disagree.
+     */
+    segmentLimit(state): number {
+      return effectiveSegmentLimit(state.providers, state.ttsProviderId, MAX_TEXT_LENGTH)
     },
 
     /** Models offered by the selected LLM provider. */

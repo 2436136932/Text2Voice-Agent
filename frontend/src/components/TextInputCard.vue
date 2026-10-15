@@ -6,7 +6,7 @@
 import { computed, ref } from 'vue'
 import { Delete, MagicStick, Microphone } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { MAX_TEXT_LENGTH, MAX_TOTAL_TEXT_LENGTH, useConfigStore } from '@/stores/config'
+import { MAX_TOTAL_TEXT_LENGTH, useConfigStore } from '@/stores/config'
 import { segmentText } from '@/utils/segment'
 
 const props = withDefaults(
@@ -32,8 +32,15 @@ const emit = defineEmits<{
 
 const configStore = useConfigStore()
 
-/** Per-request limit; longer text is segmented (see segmentCount below). */
-const maxLen = MAX_TEXT_LENGTH
+/**
+ * Real per-request limit for the selected TTS provider.
+ *
+ * Providers declare their own `max_chars` (volcengine 1024, edge 3000, mimo
+ * 4000, openai 4096 …), so the split limit is the smaller of that and the
+ * pipeline limit. Reading MAX_TEXT_LENGTH directly here is what let the badge
+ * promise 2 segments while the provider rejected segment 1 outright.
+ */
+const maxLen = computed<number>(() => configStore.segmentLimit)
 /** Ceiling for the whole input, so one run cannot queue hundreds of jobs. */
 const maxTotal = MAX_TOTAL_TEXT_LENGTH
 
@@ -63,7 +70,7 @@ const text = computed<string>({
  * otherwise "6000 / 5000" would look like an error rather than a split.
  */
 const counter = computed<string>(() => {
-  if (text.value.length <= maxLen) return `${text.value.length} / ${maxLen}`
+  if (text.value.length <= maxLen.value) return `${text.value.length} / ${maxLen.value}`
   return `${text.value.length} / ${maxTotal}`
 })
 
@@ -75,8 +82,8 @@ const trimmedLength = computed<number>(() => text.value.trim().length)
  * before the user presses generate.
  */
 const segmentCount = computed<number>(() => {
-  if (trimmedLength.value <= maxLen) return 1
-  return segmentText(text.value, { limit: maxLen }).segments.length
+  if (trimmedLength.value <= maxLen.value) return 1
+  return segmentText(text.value, { limit: maxLen.value }).segments.length
 })
 
 /** Whether the button is actually clickable. */
