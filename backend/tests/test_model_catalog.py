@@ -18,8 +18,6 @@ from app.services.model_catalog import (
     resolve_models_url,
 )
 
-pytestmark = pytest.mark.asyncio
-
 
 class TestAuthSchemes:
     """Sending the wrong header yields a 401 that looks like a bad key."""

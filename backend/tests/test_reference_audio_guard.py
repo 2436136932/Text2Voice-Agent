@@ -25,8 +25,6 @@ from app.services.generation import GenerationService
 from app.services.media import media_store
 from app.services.voices import clone_requires_registration_error
 
-pytestmark = pytest.mark.asyncio
-
 
 def make_clip() -> str:
     record = media_store.save(

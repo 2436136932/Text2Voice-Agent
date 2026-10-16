@@ -11,7 +11,6 @@ with "reference audio required" — what happened when switching from
 
 from __future__ import annotations
 
-import pytest
 
 from app.adapters.base import TTSRequest
 from app.adapters.registry import registry
@@ -20,7 +19,6 @@ from app.schemas.generation import GenerateRequest
 from app.services.generation import GenerationService
 from app.services.media import media_store
 
-pytestmark = pytest.mark.asyncio
 
 CLONE_MODEL = "mimo-v2.5-tts-voiceclone"
 PLAIN_MODEL = "mimo-v2.5-tts"

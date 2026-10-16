@@ -18,8 +18,6 @@ from app.adapters.base import TTSRequest
 from app.adapters.registry import registry
 from app.core.errors import AppError, ErrorCode
 
-pytestmark = pytest.mark.asyncio
-
 
 class _Recorder:
     """Captures the outgoing request and replies like a strict gateway."""

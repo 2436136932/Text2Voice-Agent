@@ -18,8 +18,6 @@ from app.db.models import TaskModel
 from app.schemas.generation import GenerateRequest
 from app.services.tasks import TaskManager, TaskState
 
-pytestmark = pytest.mark.asyncio
-
 
 def make_request() -> GenerateRequest:
     """A minimal offline request: mock LLM echoes, mock TTS renders a WAV."""

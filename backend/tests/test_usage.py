@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import pytest
 from sqlalchemy import select
 
 from app.db.models import GenerationRecord
 from app.schemas.generation import GenerateRequest
 from app.services.generation import GenerationService
-
-pytestmark = pytest.mark.asyncio
 
 
 async def seed(session, *, provider: str, model: str, tokens: int) -> None:

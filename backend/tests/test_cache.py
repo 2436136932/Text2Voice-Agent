@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 from sqlalchemy import select
 
 from app.adapters.base import TTSRequest, TTSResult
@@ -12,8 +11,6 @@ from app.db.models import TTSCacheEntry
 from app.services.cache import TTSCache, cache_key, cache_file_name
 from app.schemas.generation import GenerateRequest
 from app.services.generation import GenerationService
-
-pytestmark = pytest.mark.asyncio
 
 
 class TestCacheKey:

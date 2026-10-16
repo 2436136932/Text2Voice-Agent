@@ -9,8 +9,6 @@ import pytest
 from app.core.errors import AppError, ErrorCode
 from app.core.rate_limit import Bucket, InMemoryRateLimitStore, RateLimiter
 
-pytestmark = pytest.mark.asyncio
-
 
 class TestBucket:
     def test_starts_full(self):

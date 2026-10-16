@@ -21,7 +21,6 @@ from app.adapters.base import TTSRequest
 from app.adapters.registry import registry
 from app.core.errors import AppError, ErrorCode
 
-pytestmark = pytest.mark.asyncio
 
 FAKE_AUDIO = b"ID3" + b"\x00" * 100
 

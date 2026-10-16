@@ -16,8 +16,6 @@ from app.schemas.generation import GenerateRequest
 from app.services.audio import AudioStore, estimate_duration_ms
 from app.services.generation import GenerationService
 
-pytestmark = pytest.mark.asyncio
-
 
 class TestRetryPolicy:
     async def test_retries_then_succeeds(self, monkeypatch):

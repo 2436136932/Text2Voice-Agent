@@ -12,7 +12,6 @@ from app.core.errors import AppError, ErrorCode
 from app.services.media import enhance_media, media_store
 from app.services.tools import ffmpeg_status
 
-pytestmark = pytest.mark.asyncio
 
 RATE = 24_000
 

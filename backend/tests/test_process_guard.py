@@ -12,8 +12,6 @@ import pytest
 
 from app.core.config import settings
 
-pytestmark = pytest.mark.asyncio
-
 
 class TestSingleProcessGuard:
     def test_single_worker_is_allowed(self, monkeypatch):

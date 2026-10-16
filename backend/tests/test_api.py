@@ -9,9 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-import pytest
 
-pytestmark = pytest.mark.asyncio
 
 MOCK_LLM = {"provider": "mock", "model": "mock-echo-v1"}
 MOCK_TTS = {"provider": "mock", "voice": "mock-neutral", "format": "wav"}

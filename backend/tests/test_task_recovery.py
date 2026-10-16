@@ -22,8 +22,6 @@ from app.core.errors import AppError, ErrorCode
 from app.db.models import TaskModel
 from app.services.tasks import INTERRUPTED_STATUS, TERMINAL_STATUSES, TaskManager, TaskState
 
-pytestmark = pytest.mark.asyncio
-
 
 async def add_row(session, **overrides) -> TaskModel:
     """Insert a raw ``tasks`` row, as a killed process would have left it."""
