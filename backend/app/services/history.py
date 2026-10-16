@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError, ErrorCode
 from app.core.logging import get_logger
+from app.db.base import session_scope
 from app.db.models import GenerationRecord
 from app.schemas.generation import HistoryItem, HistoryListResponse, normalize_tags
 from app.services.audio import audio_store
@@ -380,6 +381,72 @@ class HistoryService:
     @staticmethod
     def _to_item(row: GenerationRecord) -> HistoryItem:
         return HistoryItem(**row.to_dict())
+
+
+async def record_failed_attempt(
+    *,
+    input_text: str,
+    llm_provider: str = "",
+    llm_model: str = "",
+    tts_provider: str = "",
+    tts_voice: str = "",
+    tts_model: str = "",
+    audio_format: str = "",
+    reply_text: str = "",
+    error_code: str | None = None,
+    error_message: str | None = None,
+    request_id: str | None = None,
+    status: str = "failed",
+) -> int | None:
+    """Persist a failed generation attempt so the user can see and retry it.
+
+    Failed attempts used to leave no trace at all: a record was only written
+    after the LLM *and* the TTS step succeeded. So a user whose long document
+    died on the first segment saw nothing in history, had no way to tell what
+    went wrong, and no way to re-run it -- even though the schema, the API
+    serialization (``audio_url`` is None for anything but ``succeeded``) and the
+    whole history UI were already built to display non-successful rows.
+
+    Runs in its own transaction on purpose. The caller is on its way to raising,
+    so its session is about to be rolled back -- a row written there would
+    vanish. This is also why it must never raise: a bookkeeping failure must not
+    replace the real error the caller is reporting.
+    """
+    try:
+        async with session_scope() as session:
+            row = GenerationRecord(
+                input_text=input_text,
+                # A TTS failure happens *after* the reply exists, so keep it when
+                # we have it; an LLM failure has nothing to keep.
+                reply_text=reply_text or "",
+                llm_provider=llm_provider or "",
+                llm_model=llm_model or "",
+                tts_provider=tts_provider or "",
+                tts_voice=tts_voice or "",
+                tts_model=tts_model or "",
+                audio_format=audio_format or "",
+                audio_bytes=0,
+                # No audio was produced; the model column is NOT NULL with an
+                # empty-string default, and to_dict only exposes a URL for
+                # succeeded rows anyway.
+                audio_path="",
+                status=status,
+                error_code=error_code,
+                error_message=error_message,
+                request_id=request_id,
+                created_at=datetime.now(timezone.utc),
+            )
+            session.add(row)
+            await session.flush()
+            record_id = row.id
+        logger.info(
+            "recorded failed attempt record_id=%s status=%s code=%s",
+            record_id, status, error_code,
+        )
+        return record_id
+    except Exception as exc:  # noqa: BLE001 - must never mask the real error
+        logger.warning("could not record failed attempt error=%s", exc)
+        return None
 
 
 history_service = HistoryService()

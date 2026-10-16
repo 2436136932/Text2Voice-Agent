@@ -58,7 +58,7 @@ from app.core.config import settings
 from app.core.errors import AppError, ErrorCode
 from app.core.logging import get_logger
 from app.db.base import session_scope
-from app.db.models import TaskModel, iso_utc
+from app.db.models import GenerationRecord, TaskModel, iso_utc
 from app.schemas.generation import GenerateRequest
 from app.services.generation import generation_service
 from app.services.metrics import metrics
@@ -595,6 +595,56 @@ class TaskManager:
             retryable=True,
         ).to_payload(request_id)
 
+    @staticmethod
+    def _interrupted_history_row(
+        row: TaskModel, finished_at: datetime
+    ) -> GenerationRecord | None:
+        """Build the history row for a task lost to a restart.
+
+        Task rows are never shown in the UI, so without this an interrupted
+        attempt is invisible: the user sees nothing in history and has nothing
+        to retry. Everything needed to rebuild the request comes from
+        ``request_payload``, which is the credential-stripped snapshot -- there
+        is deliberately no key in it, and none is written here.
+
+        Returns ``None`` when the original request asked not to keep history, or
+        when the payload is missing/unusable.
+        """
+        payload = row.request_payload or {}
+        if not isinstance(payload, dict):
+            return None
+
+        options = payload.get("options") or {}
+        if isinstance(options, dict) and options.get("auto_save") is False:
+            return None
+
+        llm = payload.get("llm") or {}
+        tts = payload.get("tts") or {}
+        if not isinstance(llm, dict) or not isinstance(tts, dict):
+            return None
+
+        text = payload.get("text")
+        if not isinstance(text, str) or not text:
+            return None
+
+        return GenerationRecord(
+            input_text=text,
+            reply_text="",
+            llm_provider=str(llm.get("provider") or ""),
+            llm_model=str(llm.get("model") or ""),
+            tts_provider=str(tts.get("provider") or ""),
+            tts_voice=str(tts.get("voice") or ""),
+            tts_model=str(tts.get("model") or ""),
+            audio_format=str(tts.get("format") or ""),
+            audio_bytes=0,
+            audio_path="",
+            status=INTERRUPTED_STATUS,
+            error_code=ErrorCode.TASK_INTERRUPTED.value,
+            error_message=INTERRUPTED_MESSAGE,
+            request_id=row.request_id,
+            created_at=_as_aware_utc(row.created_at) or finished_at,
+        )
+
     async def restore_from_db(self) -> None:
         """Rehydrate tasks after a restart, closing out the orphaned ones.
 
@@ -644,6 +694,15 @@ class TaskManager:
                                 * 1000
                             ),
                         )
+                    # Also surface it in history, so the user can see that the
+                    # attempt was lost and retry it. Without this the task row is
+                    # the only trace, and task rows are never shown in the UI.
+                    # Safe against duplicates: this branch runs only for rows
+                    # that were pending/running, and it rewrites them to a
+                    # terminal state in the same transaction.
+                    history_row = self._interrupted_history_row(row, finished_at)
+                    if history_row is not None:
+                        session.add(history_row)
             for row in rows:
                 self._tasks[row.task_id] = TaskState(
                     task_id=row.task_id,

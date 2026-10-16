@@ -28,6 +28,7 @@ fingerprint produced by ``GenerateRequest.key_fingerprints()``.
 from __future__ import annotations
 
 import base64
+import asyncio
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -51,6 +52,7 @@ from app.schemas.generation import (
 )
 from app.services.audio import audio_store, estimate_duration_ms
 from app.services.cache import cache_key, tts_cache
+from app.services.history import record_failed_attempt
 from app.services.media import media_store
 from app.services.metrics import metrics
 from app.services.providers import annotate_tts_error
@@ -117,18 +119,24 @@ class GenerationService:
         on_progress: ProgressCallback,
     ) -> tuple[str, LLMResultSchema, bool, str | None]:
         """Return ``(reply_text, result, degraded, degraded_reason)``."""
-        adapter = registry.llm(request.llm.provider)
-        api_key = request.llm.api_key.get_secret_value() if request.llm.api_key else ""
-
         if request.options.reuse_reply_text:
             # "Re-synthesize only": keep the previous reply verbatim.
+            #
+            # This branch MUST come before the adapter lookup. Resolving the LLM
+            # adapter first made a run that never calls the LLM fail anyway when
+            # `llm_provider` was stale or unknown (LLM_UNSUPPORTED_PROVIDER) --
+            # which broke 直接配音 and reply-reuse runs for no reason, and left
+            # the backend disagreeing with the frontend, whose `canGenerate`
+            # deliberately does not require any LLM field in these modes.
             reply = request.options.reuse_reply_text
             on_progress("llm", 40, "复用上一条回复文本，跳过 LLM 调用")
             return (
                 reply,
                 LLMResultSchema(
                     provider=request.llm.provider,
-                    model=request.llm.model or adapter.default_model,
+                    # No model ran, so do not invent one from an adapter that was
+                    # never resolved; record what was asked for.
+                    model=request.llm.model or "",
                     latency_ms=0,
                     usage=UsageSchema(),
                     finish_reason="reused",
@@ -136,6 +144,9 @@ class GenerationService:
                 False,
                 None,
             )
+
+        adapter = registry.llm(request.llm.provider)
+        api_key = request.llm.api_key.get_secret_value() if request.llm.api_key else ""
 
         on_progress("llm", 15, f"正在调用 {adapter.name} 生成回复…")
 
@@ -493,6 +504,53 @@ class GenerationService:
     # ------------------------------------------------------------------
     # Orchestration
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    async def _record_failure(
+        self,
+        session: AsyncSession,
+        request: GenerateRequest,
+        error: AppError,
+        reply_text: str,
+        request_id: str | None,
+    ) -> None:
+        """Persist a failed attempt, then let the caller re-raise.
+
+        Two deliberate choices:
+
+        * ``auto_save`` is honoured. A user who asked NOT to keep history must
+          not get rows for attempts that produced nothing.
+        * The caller's session is rolled back first. It is about to be rolled
+          back anyway (the caller is raising), and holding its write lock would
+          block the separate transaction that stores the failure row. Rolling
+          back here is what lets that row actually commit.
+        """
+        if not request.options.auto_save:
+            return
+
+        # Release the caller's transaction so the failure row is not blocked by
+        # it. Failure here is not fatal: the important thing is the original
+        # error, and record_failed_attempt never raises.
+        try:
+            await session.rollback()
+        except Exception:  # noqa: BLE001 - best effort
+            logger.debug("rollback before recording failure failed", exc_info=True)
+
+        await record_failed_attempt(
+            input_text=request.text,
+            llm_provider=request.llm.provider,
+            llm_model=request.llm.model or "",
+            tts_provider=request.tts.provider,
+            tts_voice=request.tts.voice or "",
+            tts_model=request.tts.model or "",
+            audio_format=request.tts.format or "",
+            # A TTS failure happens after the reply exists, so keep it: the user
+            # can still read what the model wrote before the audio step broke.
+            reply_text=reply_text,
+            error_code=error.code.value,
+            error_message=error.message,
+            request_id=request_id,
+        )
+
     async def generate(
         self,
         session: AsyncSession,
@@ -518,17 +576,46 @@ class GenerationService:
 
         degraded_reasons: list[str] = []
 
-        reply_text, llm_result, llm_degraded, llm_reason = await self._run_llm(
-            request, on_progress=progress
-        )
-        if llm_degraded and llm_reason:
-            degraded_reasons.append(llm_reason)
+        # A failed attempt is recorded so the user can see it and retry it.
+        # Previously nothing was written unless BOTH steps succeeded, so a
+        # long-document run that died on its first segment left no trace at all.
+        reply_text = ""
+        try:
+            reply_text, llm_result, llm_degraded, llm_reason = await self._run_llm(
+                request, on_progress=progress
+            )
+            if llm_degraded and llm_reason:
+                degraded_reasons.append(llm_reason)
 
-        audio, tts_result, audio_format, tts_degraded, tts_reason = await self._run_tts(
-            request, reply_text, session=session, on_progress=progress
-        )
-        if tts_degraded and tts_reason:
-            degraded_reasons.append(tts_reason)
+            audio, tts_result, audio_format, tts_degraded, tts_reason = await self._run_tts(
+                request, reply_text, session=session, on_progress=progress
+            )
+            if tts_degraded and tts_reason:
+                degraded_reasons.append(tts_reason)
+        except asyncio.CancelledError:
+            # Cancellation is deliberate (the user stopped it, or the app is
+            # shutting down), so it is not a failure to report. Critically, do
+            # NOT await anything here: awaiting inside a cancellation path is
+            # exactly what used to hang shutdown, because an aiosqlite write
+            # does not observe cancellation.
+            raise
+        except AppError as exc:
+            await self._record_failure(session, request, exc, reply_text, request_id)
+            raise
+        except Exception as exc:  # noqa: BLE001 - record, then re-raise as-is
+            logger.exception("generation crashed request_id=%s", request_id)
+            await self._record_failure(
+                session,
+                request,
+                AppError(
+                    ErrorCode.INTERNAL_ERROR,
+                    f"生成过程异常：{type(exc).__name__}",
+                    detail={"type": type(exc).__name__},
+                ),
+                reply_text,
+                request_id,
+            )
+            raise
 
         progress("persist", 92, "正在保存结果…")
 
