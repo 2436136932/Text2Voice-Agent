@@ -38,6 +38,7 @@ import {
   type RetryItemResult,
 } from '@/utils/batchRetry'
 import { pollUntilTerminal } from '@/utils/taskPolling'
+import { withRateLimitRetry } from '@/utils/rateLimit'
 import { submitTask } from '@/api'
 import { zip } from 'fflate'
 
@@ -85,6 +86,12 @@ const retryStop = ref(false)
 /** Items finished so far, for the progress line and the final summary. */
 const retryDone = ref(0)
 const retryTotal = ref(0)
+/**
+ * Set while waiting out a rate limit, so the pause is explained rather than
+ * looking like a hang. A batch exceeds the 10-per-60s generate budget, so this
+ * is expected on larger selections.
+ */
+const limitNote = ref('')
 
 /** Selected records whose status warrants a retry. */
 const retryableSelection = computed<HistoryItem[]>(() =>
@@ -158,8 +165,24 @@ async function retrySelected(): Promise<void> {
       submit: async (item) => {
         // Rebuild from the record's own parameters, then submit through the
         // normal path so the request shape matches a manual generation exactly.
+        //
+        // Wrapped in rate-limit handling: a batch larger than the "generate"
+        // budget (10 per 60s) exceeded it and failed part-way through -- seen
+        // live as "请求过于频繁" on a 12-item run. Waiting for the server's own
+        // retry_after turns those failures into successes instead of weakening
+        // the limit.
         applyRecordToConfig(item)
-        return submitTask(configStore.buildRequest())
+        const submitted = await withRateLimitRetry(
+          () => submitTask(configStore.buildRequest()),
+          {
+            shouldStop: () => retryStop.value,
+            onWait: (waitMs) => {
+              limitNote.value = `${Math.ceil(waitMs / 1000)} 秒后继续（触发限流，正在等待）`
+            },
+          },
+        )
+        limitNote.value = ''
+        return submitted
       },
       poll: (taskId) => pollUntilTerminal(taskId, { shouldStop: () => retryStop.value }),
       onProgress: (_result, done) => {
@@ -730,7 +753,8 @@ watch(drawerVisible, (open) => {
       >
         <template #title>
           正在依次重试{{ retryProgressText ? `：${retryProgressText}` : '' }}（已完成
-          {{ retryDone }} / {{ retryTotal }}）。每条都会真实调用服务商，可点「停止」中止。
+          {{ retryDone }} / {{ retryTotal }}）。<template v-if="limitNote">{{ limitNote }}。</template
+          ><template v-else>每条都会真实调用服务商，可点「停止」中止。</template>
         </template>
       </el-alert>
 

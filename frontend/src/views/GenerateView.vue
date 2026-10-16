@@ -43,6 +43,7 @@ import {
   type SegmentRunToken,
 } from '@/utils/taskStatus'
 import { segmentText } from '@/utils/segment'
+import { withRateLimitRetry } from '@/utils/rateLimit'
 import { POLL_INTERVAL_MS, POLL_MAX_ATTEMPTS, pollUntilTerminal } from '@/utils/taskPolling'
 
 const configStore = useConfigStore()
@@ -94,6 +95,12 @@ function runSignal(): SegmentRunToken {
   return { current: segmentRunToken.value, canceled: segmentCanceled.value }
 }
 
+/**
+ * Set while waiting out a rate limit, so the pause is explained instead of
+ * looking like a stall. Cleared as soon as the submission goes through.
+ */
+const limitNote = ref('')
+
 /** Apply a helper's verdict back onto the reactive refs. */
 function applySignal(next: SegmentRunToken): void {
   segmentRunToken.value = next.current
@@ -116,6 +123,8 @@ const progress = computed(() => {
 })
 const stageMessage = computed(() => {
   if (segmented.value) {
+    // A rate-limit pause must be visible, otherwise the run looks stuck.
+    if (limitNote.value) return limitNote.value
     // Only promise auto-continue while the run is actually live: after 停止生成
     // the old text ("每段完成后自动继续") directly contradicted what the loop
     // was doing, which is what made the original bug so confusing.
@@ -316,7 +325,18 @@ async function runGeneration(overrides?: Partial<GenerateOptions>): Promise<void
 
   generating.value = true
   try {
-    const submitted = await submitTask(payload)
+    // Same rate-limit handling as the segmented path: repeated clicks (or a run
+    // straight after a batch) should wait rather than fail.
+    //
+    // `finish()` clears `segmentCanceled`, so on this path a cancel is detected
+    // by `generating` having been switched off (finish() sets it false).
+    const submitted = await withRateLimitRetry(() => submitTask(payload), {
+      shouldStop: () => segmentCanceled.value || !generating.value,
+      onWait: (waitMs) => {
+        limitNote.value = `${Math.ceil(waitMs / 1000)} 秒后继续（触发限流，正在等待）`
+      },
+    })
+    limitNote.value = ''
     currentTaskId.value = submitted.task_id
     task.value = {
       task_id: submitted.task_id,
@@ -395,7 +415,20 @@ async function runSegmented(
       if (piece === undefined) continue
       segmentIndex.value = index + 1
 
-      const submitted = await submitTask(segmentPayload(payload, piece))
+      // A long document needs more submissions than the "generate" budget
+      // allows (10 per 60s), so waiting for the server's own retry_after is
+      // what keeps segment 11+ from failing with 请求过于频繁. The stop flag is
+      // passed through so cancelling during a wait does not then submit.
+      const submitted = await withRateLimitRetry(
+        () => submitTask(segmentPayload(payload, piece)),
+        {
+          shouldStop: () => !canRunSegment(runSignal(), token),
+          onWait: (waitMs) => {
+            limitNote.value = `${Math.ceil(waitMs / 1000)} 秒后继续（触发限流，正在等待）`
+          },
+        },
+      )
+      limitNote.value = ''
       // Fix 3: point the page at the segment that is genuinely in flight, so
       // handleCancel() cancels the right task id.
       currentTaskId.value = submitted.task_id
