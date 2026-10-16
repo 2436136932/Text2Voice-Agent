@@ -50,8 +50,9 @@ export default defineConfig({
     },
   },
   test: {
-    // Pure-logic unit tests only (no component/DOM tests yet), so the node
-    // environment is enough and startup stays fast.
+    // `node` stays the default because most specs are pure logic and jsdom
+    // costs startup time for nothing. Component specs opt in per file with a
+    // `// @vitest-environment jsdom` docblock, so only those pay for it.
     environment: 'node',
     include: ['src/**/*.spec.ts'],
   },
