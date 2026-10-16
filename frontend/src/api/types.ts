@@ -415,7 +415,12 @@ export interface GenerateResponse {
   record_id: number | null
   reply_text: string
   input_text: string
-  audio_url: string
+  /**
+   * Null when the backend has no audio for this record. A successful
+   * generation always sets it, but the API contract allows null (see
+   * `HistoryItem.audio_url`), so every consumer must handle it.
+   */
+  audio_url: string | null
   audio_format: string
   audio_bytes: number
   audio_base64: string | null
@@ -452,7 +457,13 @@ export interface HistoryItem {
   /** User labels; always an array (backend caps count and length). */
   tags: string[]
   created_at: string
-  audio_url: string
+  /**
+   * Null for anything that is not a successful generation — a failed or
+   * interrupted attempt has no audio to play. The backend serializes this as
+   * null whenever `status !== 'succeeded'`, so it must not be treated as a
+   * plain string.
+   */
+  audio_url: string | null
 }
 
 /** `GET /history/{id}` — list item plus detail-only fields. */

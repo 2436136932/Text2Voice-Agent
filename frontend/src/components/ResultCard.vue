@@ -72,7 +72,16 @@ async function handleSaveAs(): Promise<void> {
     } else if (props.result.record_id !== null) {
       blob = await fetchAudioBlob(props.result.record_id)
     } else {
-      const response = await fetch(props.result.audio_url)
+      // Reachable only when there is no record id, so the guard above is what
+      // guarantees `audio_url` is set. Re-check it here rather than relying on
+      // narrowing across the branches: `audio_url` is nullable in the API
+      // contract (non-successful records have none), so this must be explicit.
+      const url = props.result.audio_url
+      if (!url) {
+        ElMessage.warning('没有可导出的音频')
+        return
+      }
+      const response = await fetch(url)
       blob = await response.blob()
     }
 

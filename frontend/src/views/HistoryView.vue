@@ -30,6 +30,15 @@ import { useHistoryStore } from '@/stores/history'
 import { useConfigStore } from '@/stores/config'
 import { formatBytes, formatDateTime, formatSeconds, statusLabel, statusTagType, truncate } from '@/utils/format'
 import { saveBlobAs } from '@/utils/download'
+import {
+  describeSummary,
+  runBatchRetry,
+  selectRetryable,
+  summarizeResults,
+  type RetryItemResult,
+} from '@/utils/batchRetry'
+import { pollUntilTerminal } from '@/utils/taskPolling'
+import { submitTask } from '@/api'
 import { zip } from 'fflate'
 
 const historyStore = useHistoryStore()
@@ -37,12 +46,14 @@ const configStore = useConfigStore()
 const router = useRouter()
 
 /**
- * Fork a past generation back into the generate page: every parameter that
- * shaped the original run (providers, model, voice, speed, format, mode and
- * the text) is pushed into the config store, so "make a small change and
- * regenerate" is one click instead of retyping everything.
+ * Copy a record's parameters into the config store.
+ *
+ * Shared by 复用此配置 and the batch retry so both restore a record the same
+ * way. Note what is NOT copied: the API key. It was never stored with the
+ * record (the backend keeps only a credential-stripped snapshot), so the
+ * request is always rebuilt with the key the user currently holds.
  */
-function reuseConfig(row: HistoryItem): void {
+function applyRecordToConfig(row: HistoryItem): void {
   configStore.llmProviderId = row.llm_provider || configStore.llmProviderId
   if (row.llm_model) configStore.llmModel = row.llm_model
   configStore.ttsProviderId = row.tts_provider || configStore.ttsProviderId
@@ -52,8 +63,144 @@ function reuseConfig(row: HistoryItem): void {
   // The input text is what the user wants to tweak; the reply is available in
   // the drawer if they want the voiced version instead.
   configStore.text = row.input_text
+}
+
+/**
+ * Fork a past generation back into the generate page: every parameter that
+ * shaped the original run (providers, model, voice, speed, format, mode and
+ * the text) is pushed into the config store, so "make a small change and
+ * regenerate" is one click instead of retyping everything.
+ */
+function reuseConfig(row: HistoryItem): void {
+  applyRecordToConfig(row)
   void router.push('/generate')
   ElMessage.success('已载入该记录的配置，可修改后重新生成')
+}
+
+/* ---------------------------- batch retry -------------------------------- */
+
+const retrying = ref(false)
+/** Set by the 停止 button while a batch is running. */
+const retryStop = ref(false)
+/** Items finished so far, for the progress line and the final summary. */
+const retryDone = ref(0)
+const retryTotal = ref(0)
+
+/** Selected records whose status warrants a retry. */
+const retryableSelection = computed<HistoryItem[]>(() =>
+  selectRetryable(historyStore.items.filter((item) => selectedIds.value.includes(item.id))),
+)
+
+/** Progress text while a batch runs, e.g. `第 3 / 8 项`. */
+const retryProgressText = computed<string>(() =>
+  retryTotal.value > 0 ? `第 ${Math.min(retryDone.value + 1, retryTotal.value)} / ${retryTotal.value} 项` : '',
+)
+
+/**
+ * Re-run the selected failed / interrupted records.
+ *
+ * Runs here rather than bouncing to the generate page: the batch needs its own
+ * progress, stop control and per-item summary, and the generate page owns a
+ * single run. The requests are still built by `configStore.buildRequest()`, so
+ * credentials keep flowing only from the local store.
+ *
+ * Sequential by design -- each item is a billable vendor call and the platform
+ * is rate limited, so a selection of 20 must not become 20 simultaneous calls.
+ */
+async function retrySelected(): Promise<void> {
+  const items = historyStore.items.filter((item) => selectedIds.value.includes(item.id))
+  const eligible = selectRetryable(items)
+
+  if (eligible.length === 0) {
+    ElMessage.warning('选中的记录中没有失败或已中断的任务，无需重试')
+    return
+  }
+
+  // Seed the store from the first record BEFORE checking eligibility. The
+  // check is `canGenerate`, which also requires non-empty text and the
+  // mode-specific fields -- and on a fresh page the composer is empty, so
+  // checking first would reject a perfectly retryable batch.
+  const first = eligible[0]
+  if (first === undefined) return
+  applyRecordToConfig(first)
+
+  // Without credentials every item would fail identically, which is a worse
+  // experience than being told once, up front.
+  if (!configStore.canGenerate) {
+    const reasons = configStore.disabledReasons
+    ElMessage.error(
+      reasons.length > 0
+        ? `无法重试：${reasons.join('；')}`
+        : '无法重试：请先在「系统设置」填写密钥与服务商',
+    )
+    return
+  }
+
+  const skipped = items.length - eligible.length
+  const skippedNote = skipped > 0 ? `，另有 ${skipped} 条已完成将被跳过` : ''
+  const confirmed = await ElMessageBox.confirm(
+    `将依次重新生成 ${eligible.length} 条失败/已中断的记录${skippedNote}。` +
+      '每一条都会真实调用服务商并可能产生费用，过程中可以随时停止。',
+    '确认批量重试',
+    { type: 'warning', confirmButtonText: '开始重试', cancelButtonText: '取消' },
+  ).catch(() => false)
+
+  if (confirmed === false) return
+
+  retrying.value = true
+  retryStop.value = false
+  retryDone.value = 0
+  retryTotal.value = items.length
+
+  try {
+    const results: RetryItemResult[] = await runBatchRetry(items, {
+      shouldStop: () => retryStop.value,
+      submit: async (item) => {
+        // Rebuild from the record's own parameters, then submit through the
+        // normal path so the request shape matches a manual generation exactly.
+        applyRecordToConfig(item)
+        return submitTask(configStore.buildRequest())
+      },
+      poll: (taskId) => pollUntilTerminal(taskId, { shouldStop: () => retryStop.value }),
+      onProgress: (_result, done) => {
+        retryDone.value = done
+      },
+    })
+
+    const summary = summarizeResults(results)
+    const failures = results.filter((r) => r.outcome === 'failed')
+    const detail =
+      failures.length > 0
+        ? `。失败原因：${failures
+            .slice(0, 3)
+            .map((f) => `${f.label}：${f.reason ?? '未知'}`)
+            .join('；')}${failures.length > 3 ? ` 等 ${failures.length} 条` : ''}`
+        : ''
+
+    if (summary.failed > 0) {
+      ElMessage.warning(describeSummary(summary) + detail)
+    } else {
+      ElMessage.success(describeSummary(summary))
+    }
+
+    // New records were created, so refresh the list.
+    await historyStore.load()
+    selectedIds.value = []
+    historyStore.setSelection([])
+  } catch (caught) {
+    ElMessage.error(caught instanceof Error ? caught.message : '批量重试失败')
+  } finally {
+    retrying.value = false
+    retryStop.value = false
+    retryDone.value = 0
+    retryTotal.value = 0
+  }
+}
+
+/** Ask the running batch to stop before the next item is submitted. */
+function stopRetry(): void {
+  retryStop.value = true
+  ElMessage.info('已请求停止：当前这一条完成后不再提交后续记录')
 }
 
 /* --------------------------- ZIP batch download -------------------------- */
@@ -550,11 +697,42 @@ watch(drawerVisible, (open) => {
           >
             打包下载{{ selectedIds.length > 0 ? `（${selectedIds.length}）` : '' }}
           </el-button>
+          <el-button
+            type="warning"
+            plain
+            :icon="Refresh"
+            :disabled="selectedIds.length === 0 || retrying"
+            :loading="retrying"
+            @click="retrySelected"
+          >
+            重试失败项{{ retryableSelection.length > 0 ? `（${retryableSelection.length}）` : '' }}
+          </el-button>
+          <el-button
+            v-if="retrying"
+            type="info"
+            plain
+            @click="stopRetry"
+          >
+            停止
+          </el-button>
           <el-button type="danger" plain :icon="Delete" :loading="deleting" @click="removeAll">
             清空全部
           </el-button>
         </div>
       </div>
+
+      <el-alert
+        v-if="retrying"
+        class="history-view__retry-progress"
+        type="info"
+        :closable="false"
+        show-icon
+      >
+        <template #title>
+          正在依次重试{{ retryProgressText ? `：${retryProgressText}` : '' }}（已完成
+          {{ retryDone }} / {{ retryTotal }}）。每条都会真实调用服务商，可点「停止」中止。
+        </template>
+      </el-alert>
 
       <div v-if="availableTags.length > 0" class="history-view__tag-filter">
         <span class="history-view__tag-filter-label">标签</span>

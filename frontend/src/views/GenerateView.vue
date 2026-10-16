@@ -43,16 +43,14 @@ import {
   type SegmentRunToken,
 } from '@/utils/taskStatus'
 import { segmentText } from '@/utils/segment'
+import { POLL_INTERVAL_MS, POLL_MAX_ATTEMPTS, pollUntilTerminal } from '@/utils/taskPolling'
 
 const configStore = useConfigStore()
 const router = useRouter()
 
 /* ------------------------------- polling ------------------------------- */
 
-const POLL_INTERVAL_MS = 900
 const POLL_TIMEOUT_MS = 5 * 60 * 1000
-/** Upper bound on polls per segment in the long-text path (~4 minutes each). */
-const POLL_MAX_ATTEMPTS = 260
 
 const generating = ref(false)
 const task = ref<TaskStatusResponse | null>(null)
@@ -502,18 +500,19 @@ function segmentPayload(payload: GenerateRequest, piece: string): GenerateReques
  *
  * Kept separate from `poll()` because the segmented path needs to await each
  * piece without the single-generation UI state machine (timers, cancel button).
+ *
+ * The loop itself now lives in `utils/taskPolling.ts` and is shared with the
+ * batch-retry path. It used to be duplicated here, and each copy carried its
+ * own list of terminal statuses -- which is how `interrupted` slipped through
+ * and made this wait until the attempt cap before reporting a timeout.
  */
 async function waitForTask(taskId: string): Promise<TaskStatusResponse> {
-  for (let attempt = 0; attempt < POLL_MAX_ATTEMPTS; attempt += 1) {
-    const status = await fetchTask(taskId)
-    // Same closed rule as poll(): `interrupted` (among others) ends the wait.
-    // Without it a restarted server would make every remaining segment poll
-    // to the attempt cap, which looks like a hang rather than a lost task.
-    if (isTerminalStatus(status.status)) {
-      return status
-    }
-    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
-  }
+  const outcome = await pollUntilTerminal(taskId, {
+    intervalMs: POLL_INTERVAL_MS,
+    maxAttempts: POLL_MAX_ATTEMPTS,
+  })
+  if (outcome.kind === 'terminal') return outcome.status
+  // No `shouldStop` is passed here, so only a timeout can reach this point.
   throw new ApiError({
     code: 'REQUEST_TIMEOUT',
     message: '分段生成超时，请稍后在历史记录中查看已完成的部分。',
