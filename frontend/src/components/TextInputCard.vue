@@ -7,7 +7,7 @@ import { computed, ref } from 'vue'
 import { Delete, MagicStick, Microphone } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { MAX_TOTAL_TEXT_LENGTH, useConfigStore } from '@/stores/config'
-import { segmentText } from '@/utils/segment'
+import { describeTokenEstimate, estimateUsage } from '@/utils/estimate'
 
 const props = withDefaults(
   defineProps<{
@@ -77,14 +77,40 @@ const counter = computed<string>(() => {
 const trimmedLength = computed<number>(() => text.value.trim().length)
 
 /**
- * How many requests this text will become. Shown as a badge so "why is my
- * 20,000-character document accepted when the limit is 5,000?" is answered
- * before the user presses generate.
+ * Pre-submit preview: characters, how many requests this becomes, and a rough
+ * token estimate for the LLM step.
+ *
+ * The segment count is taken from here rather than computed again, so the badge
+ * and the estimate cannot drift apart — and both use the provider-derived
+ * limit above, which is what the submit path sends.
  */
-const segmentCount = computed<number>(() => {
-  if (trimmedLength.value <= maxLen.value) return 1
-  return segmentText(text.value, { limit: maxLen.value }).segments.length
-})
+const estimate = computed(() =>
+  estimateUsage({
+    text: text.value,
+    limit: maxLen.value,
+    mode: configStore.mode,
+    systemPrompt: configStore.systemPrompt,
+    maxTokens: configStore.maxTokens,
+    totalCeiling: maxTotal,
+  }),
+)
+
+/** How many requests this text becomes. Shown as a badge. */
+const segmentCount = computed<number>(() => estimate.value.segmentCount)
+
+/**
+ * Token line. When the mode skips the model this says so instead of showing a
+ * figure — "0 tokens" would read as a measurement, and there is nothing to
+ * measure.
+ */
+const tokenLabel = computed<string>(() => describeTokenEstimate(estimate.value))
+
+/** Explains where the number comes from, so it is not mistaken for exact. */
+const tokenHint = computed<string>(() =>
+  estimate.value.usesLlm
+    ? '按字符类型粗略估算：中文约 1 token/字，英文约 4 字符/token，不含精确分词'
+    : '当前模式直接把输入文字合成为语音，不会调用大模型',
+)
 
 /** Whether the button is actually clickable. */
 const enabled = computed<boolean>(() => {
@@ -150,6 +176,19 @@ function handleGenerate(): void {
         </span>
         <el-tag v-if="segmentCount > 1" size="small" type="warning" effect="plain">
           将自动分为 {{ segmentCount }} 段生成
+        </el-tag>
+        <el-tooltip :content="tokenHint" placement="top">
+          <el-tag size="small" type="info" effect="plain" class="text-input-card__estimate">
+            {{ tokenLabel }}
+          </el-tag>
+        </el-tooltip>
+        <el-tag
+          v-if="estimate.exceedsTotalCeiling"
+          size="small"
+          type="danger"
+          effect="plain"
+        >
+          超出单次上限（最多 {{ maxTotal }} 字符）
         </el-tag>
       </div>
 
@@ -224,6 +263,11 @@ function handleGenerate(): void {
 
 .text-input-card__hint {
   font-size: 12px;
+}
+
+/* Tabular figures so the estimate does not jitter in width while typing. */
+.text-input-card__estimate {
+  font-variant-numeric: tabular-nums;
 }
 
 .text-input-card__generate-wrap {
