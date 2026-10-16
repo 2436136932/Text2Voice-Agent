@@ -464,6 +464,15 @@ export interface HistoryItem {
    * plain string.
    */
   audio_url: string | null
+  /**
+   * Id of the later successful run that recovered this failure.
+   *
+   * Retrying creates a NEW record rather than rewriting history, so a failure
+   * stays in the list after being recovered. Non-null means "already retried
+   * successfully": re-submitting it would spend money a second time, so the
+   * batch action skips it. Derived by the backend on read, not stored.
+   */
+  superseded_by?: number | null
 }
 
 /** `GET /history/{id}` — list item plus detail-only fields. */

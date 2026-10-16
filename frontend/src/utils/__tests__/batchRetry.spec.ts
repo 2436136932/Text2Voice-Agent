@@ -3,6 +3,7 @@ import {
   RETRYABLE_STATUSES,
   describeSummary,
   isRetryable,
+  isSuperseded,
   runBatchRetry,
   selectRetryable,
   summarizeResults,
@@ -101,6 +102,75 @@ describe('isRetryable / selectRetryable', () => {
       item({ id: 4, status: 'canceled' }),
     ]
     expect(selectRetryable(items).map((i) => i.id)).toEqual([2, 3])
+  })
+})
+
+describe('already-recovered failures are not retried again', () => {
+  it('isSuperseded reads only the derived flag', () => {
+    expect(isSuperseded(item({ superseded_by: 42 }))).toBe(true)
+    expect(isSuperseded(item({ superseded_by: null }))).toBe(false)
+    expect(isSuperseded(item({}))).toBe(false)
+  })
+
+  it('excludes a recovered failure from the selection, so the count is honest', () => {
+    const items = [
+      item({ id: 1, status: 'failed', superseded_by: 9 }),
+      item({ id: 2, status: 'failed', superseded_by: null }),
+    ]
+    // Only one row will actually be submitted, so the button must say 1.
+    expect(selectRetryable(items).map((i) => i.id)).toEqual([2])
+  })
+
+  it('reports it as skipped, naming the run that recovered it', async () => {
+    const submitted: number[] = []
+    const results = await runBatchRetry(
+      [item({ id: 1, status: 'failed', superseded_by: 9 })],
+      {
+        shouldStop: () => false,
+        submit: async (it) => {
+          submitted.push(it.id)
+          return { task_id: 't' }
+        },
+        poll: async () => terminal('succeeded'),
+      },
+    )
+
+    // The whole point: no request was made, so no money was spent.
+    expect(submitted).toEqual([])
+    expect(results[0]?.outcome).toBe('skipped')
+    expect(results[0]?.reason).toContain('已重试成功')
+    expect(results[0]?.reason).toContain('#9')
+  })
+
+  it('still submits a failure that has NOT been recovered', async () => {
+    const submitted: number[] = []
+    await runBatchRetry([item({ id: 1, status: 'failed', superseded_by: null })], {
+      shouldStop: () => false,
+      submit: async (it) => {
+        submitted.push(it.id)
+        return { task_id: 't' }
+      },
+      poll: async () => terminal('succeeded'),
+    })
+    expect(submitted).toEqual([1])
+  })
+
+  it('explains the skip in the summary instead of dropping it silently', async () => {
+    const results = await runBatchRetry(
+      [
+        item({ id: 1, status: 'failed', superseded_by: 9 }),
+        item({ id: 2, status: 'failed', superseded_by: null }),
+      ],
+      {
+        shouldStop: () => false,
+        submit: async () => ({ task_id: 't' }),
+        poll: async () => terminal('succeeded'),
+      },
+    )
+    const summary = summarizeResults(results)
+    expect(summary.skipped).toBe(1)
+    expect(summary.succeeded).toBe(1)
+    expect(describeSummary(summary)).toContain('跳过 1')
   })
 })
 

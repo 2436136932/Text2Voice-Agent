@@ -6,7 +6,7 @@ import csv
 import io
 import json
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Sequence
 
 from sqlalchemy import Text, cast, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -52,6 +52,64 @@ def tag_needles(tag: str) -> list[str]:
     if compact.isascii():
         return [compact]
     return [compact, json.dumps(tag, separators=(",", ":"))]
+
+
+#: Statuses that a later successful run can supersede.
+SUPERSEDABLE_STATUSES = ("failed", "interrupted")
+
+
+async def find_superseded_by(
+    session: AsyncSession, rows: Sequence[GenerationRecord]
+) -> dict[int, int]:
+    """Map a failed/interrupted row id to the id of the run that replaced it.
+
+    A retry re-submits the request and creates a NEW record instead of rewriting
+    history, which is right for the audit trail -- but it leaves the original
+    failure looking retryable forever. The batch action therefore kept offering
+    rows the user had already re-run successfully, and taking it up would spend
+    money a second time.
+
+    A row counts as superseded when a LATER successful record matches its text,
+    TTS provider and voice: those are what make it "the same request". The voice
+    is part of the key on purpose, so deliberately re-running the same text in a
+    different voice still counts as retryable.
+
+    Returns ``{failed_id: successful_id}``, choosing the earliest success after
+    the failure so repeated retries report the first one that worked.
+    """
+    candidates = [row for row in rows if row.status in SUPERSEDABLE_STATUSES]
+    if not candidates:
+        return {}
+
+    texts = {row.input_text for row in candidates}
+    earliest = min(row.id for row in candidates)
+
+    result = await session.execute(
+        select(
+            GenerationRecord.id,
+            GenerationRecord.input_text,
+            GenerationRecord.tts_provider,
+            GenerationRecord.tts_voice,
+        )
+        .where(GenerationRecord.status == "succeeded")
+        .where(GenerationRecord.id > earliest)
+        .where(GenerationRecord.input_text.in_(texts))
+        .order_by(GenerationRecord.id.asc())
+    )
+
+    # Keyed by the same tuple the candidate comparison uses.
+    index: dict[tuple[str, str, str], list[int]] = {}
+    for row_id, text, provider, voice in result.all():
+        index.setdefault((text, provider or "", voice or ""), []).append(row_id)
+
+    superseded: dict[int, int] = {}
+    for row in candidates:
+        key = (row.input_text, row.tts_provider or "", row.tts_voice or "")
+        for success_id in index.get(key, ()):
+            if success_id > row.id:
+                superseded[row.id] = success_id
+                break
+    return superseded
 
 
 class HistoryService:
@@ -121,8 +179,16 @@ class HistoryService:
         rows = result.scalars().all()
         pages = (total + page_size - 1) // page_size if total else 0
 
+        # Computed for the page, not stored: supersession is a property of the
+        # set (a later success exists), so it is derived rather than a column
+        # that could drift out of date.
+        superseded = await find_superseded_by(session, rows)
+
         return HistoryListResponse(
-            items=[self._to_item(row) for row in rows],
+            items=[
+                self._to_item(row, superseded_by=superseded.get(row.id))
+                for row in rows
+            ],
             total=total,
             page=page,
             page_size=page_size,
@@ -141,7 +207,9 @@ class HistoryService:
         return row
 
     async def get_item(self, session: AsyncSession, record_id: int) -> HistoryItem:
-        return self._to_item(await self.get(session, record_id))
+        row = await self.get(session, record_id)
+        superseded = await find_superseded_by(session, [row])
+        return self._to_item(row, superseded_by=superseded.get(row.id))
 
     async def update(
         self,
@@ -379,8 +447,10 @@ class HistoryService:
 
     # -- mapping ------------------------------------------------------------
     @staticmethod
-    def _to_item(row: GenerationRecord) -> HistoryItem:
-        return HistoryItem(**row.to_dict())
+    def _to_item(
+        row: GenerationRecord, *, superseded_by: int | None = None
+    ) -> HistoryItem:
+        return HistoryItem(**row.to_dict(), superseded_by=superseded_by)
 
 
 async def record_failed_attempt(

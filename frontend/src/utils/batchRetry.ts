@@ -64,9 +64,28 @@ export function isRetryable(item: Pick<HistoryItem, 'status'>): boolean {
   return RETRYABLE_STATUSES.includes(item.status)
 }
 
-/** The records a batch run would actually (re)submit. */
-export function selectRetryable<T extends Pick<HistoryItem, 'status'>>(items: T[]): T[] {
-  return items.filter(isRetryable)
+/**
+ * Has this failure already been recovered by a later successful run?
+ *
+ * A retry creates a new record rather than rewriting history, so a failure
+ * stays listed after it has been fixed. Without this check the batch kept
+ * offering such rows, and running them again would spend money a second time.
+ * The backend derives `superseded_by`; this only reads it.
+ */
+export function isSuperseded(item: Pick<HistoryItem, 'superseded_by'>): boolean {
+  return item.superseded_by !== null && item.superseded_by !== undefined
+}
+
+/**
+ * The records a batch run would actually submit.
+ *
+ * Excludes anything already recovered, so the count shown on the button and the
+ * work the batch does cannot disagree. `isRetryable` alone is the status check.
+ */
+export function selectRetryable<
+  T extends Pick<HistoryItem, 'status' | 'superseded_by'>,
+>(items: T[]): T[] {
+  return items.filter((item) => isRetryable(item) && !isSuperseded(item))
 }
 
 /** Count a run's results. */
@@ -185,6 +204,21 @@ export async function runBatchRetry(
         label,
         outcome: 'skipped',
         reason: item.status === 'succeeded' ? '已成功，无需重试' : '状态不支持重试',
+      }
+      results.push(result)
+      deps.onProgress?.(result, results.length, total)
+      continue
+    }
+
+    if (isSuperseded(item)) {
+      // Reported rather than dropped: the user selected this row, so silently
+      // ignoring it would be confusing. Running it would spend money again for
+      // a result that already exists.
+      const result: RetryItemResult = {
+        id: item.id,
+        label,
+        outcome: 'skipped',
+        reason: `已重试成功（记录 #${item.superseded_by}），无需再次提交`,
       }
       results.push(result)
       deps.onProgress?.(result, results.length, total)

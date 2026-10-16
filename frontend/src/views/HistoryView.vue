@@ -894,6 +894,15 @@ watch(drawerVisible, (open) => {
                 {{ statusLabel(row.status) }}
               </el-tag>
               <el-tag v-if="row.degraded" type="warning" size="small" effect="plain">降级</el-tag>
+              <!-- A recovered failure is skipped by 重试失败项, so say why here
+                   rather than letting the button count look wrong. -->
+              <el-tooltip
+                v-if="row.superseded_by"
+                :content="`已由记录 #${row.superseded_by} 重试成功，批量重试会跳过它`"
+                placement="top"
+              >
+                <el-tag type="success" size="small" effect="plain">已重试成功</el-tag>
+              </el-tooltip>
             </div>
           </template>
         </el-table-column>

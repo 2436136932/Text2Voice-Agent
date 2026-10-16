@@ -388,6 +388,11 @@ class HistoryItem(BaseModel):
     tags: list[str] = Field(default_factory=list)
     created_at: AwareUTC | None = None
     audio_url: str | None = None
+    #: For a failed/interrupted row, the id of the later successful run of the
+    #: same request. Retrying creates a new record, so this is how the UI knows
+    #: a failure has already been recovered and must not be re-submitted (which
+    #: would spend money again). Derived, never stored.
+    superseded_by: int | None = None
 
 
 class HistoryUpdateRequest(BaseModel):
